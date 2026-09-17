@@ -41,7 +41,13 @@ APPS = {
     "file explorer": ["explorer.exe"],
     "explorer": ["explorer.exe"],
 }
-
+# Allowed applications for closing
+CLOSE_APPS = {
+    "chrome": "chrome.exe",
+    "notepad": "notepad.exe",
+    "calculator": "CalculatorApp.exe",
+    "explorer": "explorer.exe"
+}
 # Allowed folders
 def get_folders():
     home = os.path.expanduser("~")
@@ -69,8 +75,25 @@ def open_application(app_name):
     except Exception as error:
         print(f"Assistant: I could not open {app_name}.")
         print(f"System error: {error}")
+def close_application(app_name):
+    app_name = app_name.strip().lower()
 
+    if app_name not in CLOSE_APPS:
+        print(f"Assistant: I am not allowed to close '{app_name}'.")
+        return
 
+    process_name = CLOSE_APPS[app_name]
+
+    try:
+        subprocess.run(
+            ["taskkill", "/IM", process_name, "/F"],
+            capture_output=True,
+            text=True
+        )
+        print(f"Assistant: Closed {app_name}.")
+    except Exception as error:
+        print(f"Assistant: I could not close {app_name}.")
+        print(f"System error: {error}")
 def open_folder(folder_name):
     folders = get_folders()
     folder_name = folder_name.strip().lower()
@@ -171,6 +194,9 @@ def execute_action(action):
     if action_type == "open_app":
         open_application(target)
 
+    elif action_type == "close_app":
+        close_application(target)    
+
     elif action_type == "open_folder":
         open_folder(target)
 
@@ -247,7 +273,27 @@ Examples:
 
 All of these mean open_app.
 
-2. OPEN FOLDER
+2. CLOSE APPLICATION
+Use when the user wants to close an allowed application.
+
+JSON:
+{"action":"close_app","target":"calculator"}
+
+Allowed applications:
+- chrome
+- notepad
+- calculator
+- explorer
+
+Examples:
+"close calculator"
+"can you close Chrome?"
+"shut down Notepad"
+"please exit the calculator"
+
+All of these mean close_app.
+
+3. OPEN FOLDER
 Use when the user wants to open a Windows folder.
 
 JSON:
@@ -269,7 +315,7 @@ Examples:
 
 These mean open_folder.
 
-3. LIST FILES
+4. LIST FILES
 Use when the user wants to SEE, SHOW, LIST, CHECK, or KNOW WHAT FILES are inside an allowed folder.
 
 JSON:
@@ -289,7 +335,7 @@ IMPORTANT:
 If the user asks what files are inside a folder, use list_files.
 If the user asks to open or go to a folder, use open_folder.
 
-4. CREATE FOLDER
+5. CREATE FOLDER
 Use when the user wants to create a new folder.
 
 JSON:
@@ -297,11 +343,11 @@ JSON:
 
 Only create folders inside the allowed Documents location.
 
-5. HELP
+6. HELP
 JSON:
 {"action":"help","target":""}
 
-6. SAVE PERSONAL MEMORY
+7. SAVE PERSONAL MEMORY
 Use ONLY when the user explicitly asks you to remember something.
 
 JSON:
@@ -309,13 +355,13 @@ JSON:
 
 Never invent personal information.
 
-7. RETRIEVE PERSONAL MEMORY
+8. RETRIEVE PERSONAL MEMORY
 Use when the user asks about something that may have been saved in personal memory.
 
 JSON:
 {"action":"recall","target":"favorite_game"}
 
-8. NORMAL CONVERSATION
+9. NORMAL CONVERSATION
 For questions, explanations, casual conversation, or requests that cannot safely be performed.
 
 JSON:
