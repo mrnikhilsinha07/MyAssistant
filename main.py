@@ -14,7 +14,7 @@ import memory_manager
 # Stage 3: Local AI Brain + Computer Control
 # ==========================================
 
-MODEL = "qwen3:4b"
+MODEL = "qwen3:1.7b"
 
 # Personal memory
 PERSONAL_MEMORY_FILE = os.path.join(
@@ -469,7 +469,8 @@ def execute_action(action):
         res = f"Found {len(apps)} running applications"
 
     elif action_type == "create_folder":
-        create_folder(target)
+        folder_name = target.replace("Documents/", "", 1).replace("Documents\\", "", 1)
+        create_folder(folder_name)
         res = f"Created folder {target}"
 
     elif action_type == "time":
@@ -536,6 +537,9 @@ Your primary job is to understand the USER'S INTENT from natural language and co
 
 IMPORTANT:
 - Understand what the user means, not the exact words they use.
+- Treat natural-language variations, polite requests, indirect requests, and conversational wording as equivalent when they express the same intent.
+- Extract the requested action and its target from the user's complete sentence before selecting an action.
+- Never require the user to use the exact wording shown in the examples.
 - Do NOT depend on exact phrases, keywords, sentence structure, or the examples below.
 - The examples are only demonstrations. They are NOT a list of required phrases.
 - Different sentences with the same meaning must produce the same action.
@@ -869,6 +873,7 @@ Always choose the action based on the user's INTENT.
     "required": ["actions"],
     "additionalProperties": False
 },
+            
             think=False
         )
         ai_elapsed_time = time.perf_counter() - ai_start_time
@@ -877,8 +882,22 @@ Always choose the action based on the user's INTENT.
         action = json.loads(content)
         print("AI ACTION:", action)
 
-        execute_action(action)
+        # Safety guard: reject unrelated actions for destructive requests
+        destructive_words = (
+            "delete",
+            "erase",
+            "wipe",
+            "destroy",
+            "format",
+            "uninstall",
+            "permanently remove",
+        )
 
+        if any(word in user_message.lower() for word in destructive_words):
+            print("Assistant: This request requires a supported destructive action and was blocked for safety.")
+            return
+
+        execute_action(action)
         # Record conversation turns in SQLite memory
         memory_manager.add_conversation_turn("user", user_message)
         if isinstance(action, dict):
@@ -903,25 +922,7 @@ Always choose the action based on the user's INTENT.
         print(f"System error: {error}")
 def process_command(command):
     command = command.strip()
-        # Direct mouse-coordinate detection
-    import re
-
-    mouse_match = re.search(
-        r'\b(?:move|put|place|position|take)\b.*?\b(?:mouse|cursor|pointer)\b.*?(\d+)\s*[, ]\s*(\d+)',
-        command,
-        re.IGNORECASE
-    )
-
-    if mouse_match:
-        x = int(mouse_match.group(1))
-        y = int(mouse_match.group(2))
-
-        execute_action({
-            "action": "move_mouse",
-            "target": f"{x},{y}"
-        })
-        return
-
+    
     if command == "":
         return
 
@@ -983,6 +984,25 @@ def process_command(command):
     )
 
     multiple_targets = (mentioned_apps + mentioned_folders) > 1
+    # Send multi-target natural-language requests to the local AI.
+    # This lets the AI understand the complete user intent.
+    if multiple_targets:
+        return ask_local_ai(command)
+    # Send compound natural-language requests to the local AI.
+    compound_request = any(
+        phrase in f" {command_lower} "
+        for phrase in (
+            " and ",
+            " then ",
+            " and then ",
+            " also ",
+            " after that ",
+            " followed by ",
+        )
+    )
+
+    if compound_request:
+        return ask_local_ai(command)
 
     # Detect fast CLOSE APP requests
     close_words = [r"\bclose\b", r"\bquit\b", r"\bexit\b", r"\bshut down\b", r"\bterminate\b"]
@@ -1190,7 +1210,7 @@ def main():
     print("Local AI: ENABLED")
     print("Computer control: ENABLED")
     print("File control: ENABLED")
-    print("AI model: qwen3:4b")
+    print("AI model: qwen3:1.7b")
     print()
     print("Type 'help' to see commands.")
     print("Type 'exit' to shut down.")
