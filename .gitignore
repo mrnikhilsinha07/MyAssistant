@@ -1,5 +1,15 @@
 personal_memory.json
 memory.json
+assistant_memory.db
+*.db
+*.sqlite3
 .env
 __pycache__/
 *.pyc
+*.pyo
+*.bak
+*_pre_*.py
+.venv/
+venv/
+.vscode/
+.idea/

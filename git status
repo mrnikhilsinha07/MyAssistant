@@ -1,0 +1,397 @@
+[1mdiff --git a/main.py b/main.py[m
+[1mindex a9e6030..7d735db 100644[m
+[1m--- a/main.py[m
+[1m+++ b/main.py[m
+[36m@@ -1,8 +1,13 @@[m
+[31m-﻿import os[m
+[32m+[m[32mimport os[m
+ import subprocess[m
+ import json[m
+[32m+[m[32mimport time[m
+[32m+[m[32mimport re[m
+ from datetime import datetime[m
+[32m+[m[32mfrom pathlib import Path[m
+ import ollama[m
+[32m+[m[32mimport pyautogui[m
+[32m+[m[32mimport memory_manager[m
+ [m
+ # ==========================================[m
+ # MY PERSONAL ASSISTANT[m
+[36m@@ -46,7 +51,7 @@[m [mCLOSE_APPS = {[m
+     "chrome": "chrome.exe",[m
+     "notepad": "notepad.exe",[m
+     "calculator": "CalculatorApp.exe",[m
+[31m-    "explorer": "explorer.exe"[m
+[32m+[m[32m    "calculator app": "CalculatorApp.exe",[m
+ }[m
+ # Allowed folders[m
+ def get_folders():[m
+[36m@@ -62,53 +67,89 @@[m [mdef get_folders():[m
+     }[m
+ [m
+ [m
+[32m+[m[32mdef move_mouse(x, y):[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        x = int(x)[m
+[32m+[m[32m        y = int(y)[m
+[32m+[m
+[32m+[m[32m        screen_width, screen_height = pyautogui.size()[m
+[32m+[m
+[32m+[m[32m        if not (0 <= x < screen_width and 0 <= y < screen_height):[m
+[32m+[m[32m            print("Assistant: Mouse position is outside the screen.")[m
+[32m+[m[32m            return False[m
+[32m+[m
+[32m+[m[32m        pyautogui.moveTo(x, y, duration=0.2)[m
+[32m+[m[32m        print(f"Assistant: Moved mouse to ({x}, {y}).")[m
+[32m+[m[32m        return True[m
+[32m+[m
+[32m+[m[32m    except Exception as e:[m
+[32m+[m[32m        print(f"Assistant: Could not move mouse: {e}")[m
+[32m+[m[32m        return False[m
+[32m+[m[41m    [m
+ def open_application(app_name):[m
+     app_name = app_name.strip().lower()[m
+ [m
+     if app_name not in APPS:[m
+         print(f"Assistant: I am not allowed to open '{app_name}'.")[m
+[31m-        return[m
+[32m+[m[32m        return False[m
+ [m
+     try:[m
+         subprocess.Popen(APPS[app_name])[m
+         print(f"Assistant: Opening {app_name}.")[m
+[32m+[m[32m        return True[m
+     except Exception as error:[m
+         print(f"Assistant: I could not open {app_name}.")[m
+         print(f"System error: {error}")[m
+[32m+[m[32m        return False[m
+[32m+[m
+ def close_application(app_name):[m
+     app_name = app_name.strip().lower()[m
+ [m
+[32m+[m[32m    if app_name in {"explorer", "file explorer"}:[m
+[32m+[m[32m        print("Assistant: Closing the Windows Explorer shell is restricted for system safety.")[m
+[32m+[m[32m        return False[m
+[32m+[m
+     if app_name not in CLOSE_APPS:[m
+         print(f"Assistant: I am not allowed to close '{app_name}'.")[m
+[31m-        return[m
+[32m+[m[32m        return False[m
+ [m
+     process_name = CLOSE_APPS[app_name][m
+ [m
+     try:[m
+[31m-        subprocess.run([m
+[31m-            ["taskkill", "/IM", process_name, "/F"],[m
+[31m-            capture_output=True,[m
+[31m-            text=True[m
+[31m-        )[m
+[32m+[m[32m        if app_name in {"calculator", "calculator app"}:[m
+[32m+[m[32m            subprocess.run(["taskkill", "/IM", "CalculatorApp.exe", "/F"], capture_output=True, text=True)[m
+[32m+[m[32m            subprocess.run(["taskkill", "/IM", "Calculator.exe", "/F"], capture_output=True, text=True)[m
+[32m+[m[32m            subprocess.run(["taskkill", "/IM", "calc.exe", "/F"], capture_output=True, text=True)[m
+[32m+[m[32m        else:[m
+[32m+[m[32m            subprocess.run([m
+[32m+[m[32m                ["taskkill", "/IM", process_name, "/F"],[m
+[32m+[m[32m                capture_output=True,[m
+[32m+[m[32m                text=True[m
+[32m+[m[32m            )[m
+         print(f"Assistant: Closed {app_name}.")[m
+[32m+[m[32m        return True[m
+     except Exception as error:[m
+         print(f"Assistant: I could not close {app_name}.")[m
+         print(f"System error: {error}")[m
+[32m+[m[32m        return False[m
+[32m+[m
+ def open_folder(folder_name):[m
+     folders = get_folders()[m
+     folder_name = folder_name.strip().lower()[m
+ [m
+     if folder_name not in folders:[m
+         print(f"Assistant: I don't have permission to open '{folder_name}'.")[m
+[31m-        return[m
+[32m+[m[32m        return False[m
+ [m
+     path = folders[folder_name][m
+ [m
+     if os.path.exists(path):[m
+         os.startfile(path)[m
+         print(f"Assistant: Opening your {folder_name} folder.")[m
+[32m+[m[32m        return True[m
+     else:[m
+         print(f"Assistant: I could not find your {folder_name} folder.")[m
+[32m+[m[32m        return False[m
+ [m
+ [m
+ def list_files(folder_name):[m
+[36m@@ -117,25 +158,124 @@[m [mdef list_files(folder_name):[m
+ [m
+     if folder_name not in folders:[m
+         print(f"Assistant: I don't have access to '{folder_name}'.")[m
+[31m-        return[m
+[32m+[m[32m        return [][m
+ [m
+     path = folders[folder_name][m
+ [m
+     if not os.path.exists(path):[m
+         print(f"Assistant: I could not find your {folder_name} folder.")[m
+[31m-        return[m
+[32m+[m[32m        return [][m
+[32m+[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        items = os.listdir(path)[m
+[32m+[m[32m        print(f"\nAssistant: Contents of {folder_name}:")[m
+[32m+[m[32m        if not items:[m
+[32m+[m[32m            print("  The folder is empty.")[m
+[32m+[m[32m        else:[m
+[32m+[m[32m            for item in items:[m
+[32m+[m[32m                print(f"  - {item}")[m
+[32m+[m[32m        print()[m
+[32m+[m[32m        return items[m
+[32m+[m[32m    except Exception as e:[m
+[32m+[m[32m        print(f"Assistant: Could not read {folder_name}: {e}")[m
+[32m+[m[32m        return [][m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef count_files(folder_name):[m
+[32m+[m[32m    folders = get_folders()[m
+[32m+[m[32m    folder_name = folder_name.strip().lower()[m
+[32m+[m
+[32m+[m[32m    if folder_name not in folders:[m
+[32m+[m[32m        print("Assistant: I can only count files in approved folders.")[m
+[32m+[m[32m        return 0[m
+[32m+[m
+[32m+[m[32m    path = folders[folder_name][m
+[32m+[m
+[32m+[m[32m    if not os.path.exists(path):[m
+[32m+[m[32m        print(f"Assistant: I could not find your {folder_name} folder.")[m
+[32m+[m[32m        return 0[m
+ [m
+[31m-    items = os.listdir(path)[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        files = [[m
+[32m+[m[32m            name for name in os.listdir(path)[m
+[32m+[m[32m            if os.path.isfile(os.path.join(path, name))[m
+[32m+[m[32m        ][m
+[32m+[m[32m        print(f"Assistant: There are {len(files)} files in your {folder_name.title()} folder.")[m
+[32m+[m[32m        return len(files)[m
+[32m+[m[32m    except Exception as e:[m
+[32m+[m[32m        print(f"Assistant: I could not count the files: {e}")[m
+[32m+[m[32m        return 0[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef list_running_applications():[m
+[32m+[m[32m    """List open applications quickly using kernel32 process snapshot (sub-millisecond latency)."""[m
+[32m+[m[32m    import ctypes[m
+[32m+[m[32m    from ctypes import wintypes[m
+[32m+[m
+[32m+[m[32m    kernel32 = ctypes.windll.kernel32[m
+[32m+[m[32m    TH32CS_SNAPPROCESS = 0x00000002[m
+[32m+[m
+[32m+[m[32m    class PROCESSENTRY32(ctypes.Structure):[m
+[32m+[m[32m        _fields_ = [[m
+[32m+[m[32m            ("dwSize", wintypes.DWORD),[m
+[32m+[m[32m            ("cntUsage", wintypes.DWORD),[m
+[32m+[m[32m            ("th32ProcessID", wintypes.DWORD),[m
+[32m+[m[32m            ("th32DefaultHeapID", ctypes.c_size_t),[m
+[32m+[m[32m            ("th32ModuleID", wintypes.DWORD),[m
+[32m+[m[32m            ("cntThreads", wintypes.DWORD),[m
+[32m+[m[32m            ("th32ParentProcessID", wintypes.DWORD),[m
+[32m+[m[32m            ("pcPriClassBase", wintypes.LONG),[m
+[32m+[m[32m            ("dwFlags", wintypes.DWORD),[m
+[32m+[m[32m            ("szExeFile", ctypes.c_char * 260)[m
+[32m+[m[32m        ][m
+ [m
+[31m-    print(f"\nAssistant: Contents of {folder_name}:")[m
+[32m+[m[32m    FRIENDLY_NAMES = {[m
+[32m+[m[32m        "chrome.exe": "Google Chrome",[m
+[32m+[m[32m        "brave.exe": "Brave Browser",[m
+[32m+[m[32m        "msedge.exe": "Microsoft Edge",[m
+[32m+[m[32m        "notepad.exe": "Notepad",[m
+[32m+[m[32m        "calculatorapp.exe": "Calculator",[m
+[32m+[m[32m        "calculator.exe": "Calculator",[m
+[32m+[m[32m        "calc.exe": "Calculator",[m
+[32m+[m[32m        "explorer.exe": "File Explorer",[m
+[32m+[m[32m        "code.exe": "Visual Studio Code",[m
+[32m+[m[32m        "antigravity ide.exe": "Antigravity IDE",[m
+[32m+[m[32m        "spotify.exe": "Spotify",[m
+[32m+[m[32m        "discord.exe": "Discord",[m
+[32m+[m[32m        "whatsapp.root.exe": "WhatsApp",[m
+[32m+[m[32m        "slack.exe": "Slack",[m
+[32m+[m[32m        "teams.exe": "Microsoft Teams",[m
+[32m+[m[32m        "steam.exe": "Steam",[m
+[32m+[m[32m    }[m
+ [m
+[31m-    if not items:[m
+[31m-        print("  The folder is empty.")[m
+[32m+[m[32m    procs = set()[m
+[32m+[m[32m    hSnap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)[m
+[32m+[m[32m    if hSnap == -1 or not hSnap:[m
+[32m+[m[32m        print("Assistant: Could not inspect system processes.")[m
+[32m+[m[32m        return [][m
+[32m+[m
+[32m+[m[32m    pe = PROCESSENTRY32()[m
+[32m+[m[32m    pe.dwSize = ctypes.sizeof(PROCESSENTRY32)[m
+[32m+[m
+[32m+[m[32m    if kernel32.Process32First(hSnap, ctypes.byref(pe)):[m
+[32m+[m[32m        while True:[m
+[32m+[m[32m            exe_name = pe.szExeFile.decode("utf-8", "ignore").lower()[m
+[32m+[m[32m            if exe_name in FRIENDLY_NAMES:[m
+[32m+[m[32m                procs.add(FRIENDLY_NAMES[exe_name])[m
+[32m+[m[32m            if not kernel32.Process32Next(hSnap, ctypes.byref(pe)):[m
+[32m+[m[32m                break[m
+[32m+[m
+[32m+[m[32m    kernel32.CloseHandle(hSnap)[m
+[32m+[m[32m    apps = sorted(procs)[m
+[32m+[m
+[32m+[m[32m    if apps:[m
+[32m+[m[32m        print("Assistant: Currently open applications:")[m
+[32m+[m[32m        for app in apps:[m
+[32m+[m[32m            print(f" - {app}")[m
+     else:[m
+[31m-        for item in items:[m
+[31m-            print(f"  - {item}")[m
+[32m+[m[32m        print("Assistant: No major user applications are currently detected.")[m
+ [m
+[31m-    print()[m
+[32m+[m[32m    return apps[m
+ [m
+ [m
+ def create_folder(folder_name):[m
+[36m@@ -145,18 +285,27 @@[m [mdef create_folder(folder_name):[m
+         print("Assistant: Please provide a folder name.")[m
+         return[m
+ [m
+[31m-    safe_location = os.path.join([m
+[31m-        os.path.expanduser("~"),[m
+[31m-        "Documents",[m
+[31m-        folder_name[m
+[31m-    )[m
+[32m+[m[32m    # Sanitize invalid Windows filename/directory characters[m
+[32m+[m[32m    if re.search(r'[<>:"/\\|?*]', folder_name):[m
+[32m+[m[32m        print("Assistant: Folder name contains invalid characters.")[m
+[32m+[m[32m        return[m
+[32m+[m
+[32m+[m[32m    docs_dir = Path(os.path.expanduser("~")) / "Documents"[m
+[32m+[m[32m    target_path = (docs_dir / folder_name).resolve()[m
+ [m
+[31m-    if os.path.exists(safe_location):[m
+[32m+[m[32m    # Ensure target_path stays strictly inside Documents (prevent path traversal)[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        target_path.relative_to(docs_dir.resolve())[m
+[32m+[m[32m    except ValueError:[m
+[32m+[m[32m        print("Assistant: Blocked folder creation outside your Documents folder.")[m
+[32m+[m[32m        return[m
+[32m+[m
+[32m+[m[32m    if target_path.exists():[m
+         print("Assistant: That folder already exists.")[m
+         return[m
+ [m
+     try:[m
+[31m-        os.makedirs(safe_location)[m
+[32m+[m[32m        target_path.mkdir(parents=True, exist_ok=False)[m
+         print([m
+             f"Assistant: Created '{folder_name}' "[m
+             "inside your Documents folder."[m
+[36m@@ -187,68 +336,217 @@[m [mdef show_help():[m
+     print()[m
+ [m
+ [m
+[32m+[m[32mdef validate_action(action):[m
+[32m+[m[32m    """Validate AI-generated actions before they reach computer control."""[m
+[32m+[m
+[32m+[m[32m    if not isinstance(action, dict):[m
+[32m+[m[32m        print("Assistant: Invalid action format.")[m
+[32m+[m[32m        return False[m
+[32m+[m
+[32m+[m[32m    # Handle multi-action plans[m
+[32m+[m[32m    if "actions" in action:[m
+[32m+[m[32m        actions = action.get("actions")[m
+[32m+[m
+[32m+[m[32m        if not isinstance(actions, list) or not actions:[m
+[32m+[m[32m            print("Assistant: Invalid multi-task plan.")[m
+[32m+[m[32m            return False[m
+[32m+[m
+[32m+[m[32m        for step in actions:[m
+[32m+[m[32m            if not validate_action(step):[m
+[32m+[m[32m                return False[m
+[32m+[m
+[32m+[m[32m        return True[m
+[32m+[m
+[32m+[m[32m    action_type = action.get("action", "")[m
+[32m+[m[32m    target = action.get("target", "")[m
+[32m+[m
+[32m+[m[32m    allowed_actions = {[m
+[32m+[m[32m        "open_app",[m
+[32m+[m[32m        "move_mouse",[m
+[32m+[m[32m        "close_app",[m
+[32m+[m[32m        "open_folder",[m
+[32m+[m[32m        "list_files",[m
+[32m+[m[32m        "count_files",[m
+[32m+[m[32m        "list_running_apps",[m
+[32m+[m[32m        "create_folder",[m
+[32m+[m[32m        "time",[m
+[32m+[m[32m        "help",[m
+[32m+[m[32m        "remember",[m
+[32m+[m[32m        "recall",[m
+[32m+[m[32m        "chat"[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    if action_type not in allowed_actions:[m
+[32m+[m[32m        print(f"Assistant: Blocked unknown action '{action_type}'.")[m
+[32m+[m[32m        return False[m
+[32m+[m
+[32m+[m[32m    # Validate application targets[m
+[32m+[m[32m    if action_type in {"open_app", "close_app"}:[m
+[32m+[m[32m        allowed_apps = {[m
+[32m+[m[32m            "chrome",[m
+[32m+[m[32m            "notepad",[m
+[32m+[m[32m            "calculator",[m
+[32m+[m[32m            "calculator app",[m
+[32m+[m[32m            "explorer",[m
+[32m+[m[32m            "file explorer"[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m        if target.lower().strip() not in allowed_apps:[m
+[32m+[m[32m            print(f"Assistant: Blocked unknown application '{target}'.")[m
+[32m+[m[32m            return False[m
+[32m+[m
+[32m+[m[32m    # Validate folder targets[m
+[32m+[m[32m    if action_type in {[m
+[32m+[m[32m        "open_folder",[m
+[32m+[m[32m        "list_files",[m
+[32m+[m[32m        "count_files"[m
+[32m+[m[32m    }:[m
+[32m+[m[32m        allowed_folders = {[m
+[32m+[m[32m            "downloads",[m
+[32m+[m[32m            "documents",[m
+[32m+[m[32m            "desktop",[m
+[32m+[m[32m            "pictures",[m
+[32m+[m[32m            "videos",[m
+[32m+[m[32m            "music"[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m        if target.lower().strip() not in allowed_folders:[m
+[32m+[m[32m            print(f"Assistant: Blocked unknown folder '{target}'.")[m
+[32m+[m[32m            return False[m
+[32m+[m
+[32m+[m[32m    return True[m
+ def execute_action(action):[m
+[32m+[m[32m    if not validate_action(action):[m
+[32m+[m[32m        return None[m
+[32m+[m
+[32m+[m[32m    # Handle multiple actions in the exact order requested[m
+[32m+[m[32m    if "actions" in action and isinstance(action["actions"], list):[m
+[32m+[m[32m        results = [][m
+[32m+[m
+[32m+[m[32m        for step in action["actions"]:[m
+[32m+[m[32m            if isinstance(step, dict):[m
+[32m+[m[32m                result = execute_action(step)[m
+[32m+[m[32m                if result is not None:[m
+[32m+[m[32m                    results.append(str(result))[m
+[32m+[m
+[32m+[m[32m        return results[m
+[32m+[m
+     action_type = action.get("action", "")[m
+     target = action.get("target", "")[m
+[32m+[m[32m    res 
