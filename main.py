@@ -767,6 +767,17 @@ Use when the user asks about something that may have been saved in personal memo
 JSON:
 {"action":"recall","target":"favorite_game"}
 
+MEMORY RECALL RULES:
+- If the user asks about their own preference, fact, choice, or information that may have been saved in personal memory, ALWAYS use "recall" first.
+- Do NOT use "chat" for questions about the user's saved personal information.
+- Examples:
+  "What is my favorite programming language?" -> {"action":"recall","target":"favorite_language"}
+  "Which game do I like?" -> {"action":"recall","target":"favorite_game"}
+  "What color do I prefer?" -> {"action":"recall","target":"favorite_color"}
+- If the requested information is not saved, still use "recall". The Python memory system will report that no memory exists.
+- Never say that you do not have access to the user's personal information.
+- Never invent a personal fact.
+
 11. NORMAL CONVERSATION
 For questions, explanations, casual conversation, or requests that cannot safely be performed.
 
@@ -802,7 +813,29 @@ MOST IMPORTANT DISTINCTION:
 
 "Take me to Downloads"
 => {"action":"open_folder","target":"downloads"}
+MULTI-ACTION RULES:
 
+- A single user sentence may contain multiple requested actions.
+- Identify EVERY action the user explicitly requests.
+- Return ALL requested actions in the "actions" array, in the same order as the user's request.
+- Do not stop after identifying the first action.
+- Example:
+  User: "Open my Downloads folder and show me the files inside."
+  JSON:
+  {"actions":[
+    {"action":"open_folder","target":"downloads"},
+    {"action":"list_files","target":"downloads"}
+  ]}
+- Example:
+  User: "Launch Chrome, move my mouse to 500,300, and open Downloads."
+  JSON:
+  {"actions":[
+    {"action":"open_app","target":"chrome"},
+    {"action":"move_mouse","target":"500,300"},
+    {"action":"open_folder","target":"downloads"}
+  ]}
+- If the user asks to open something AND show/list/check its contents, return both actions.
+- Never omit a requested action just because another action appears first.
 Always choose the action based on the user's INTENT.
 """
     try:
@@ -1090,24 +1123,6 @@ def process_command(command):
 
     if command_lower == "help":
         show_help()
-        return
-        # Reliable personal memory recall
-    if command_lower.startswith("what is my "):
-        memory_key = command_lower[11:].strip(" ?.!").replace(" ", "_")
-
-        if memory_key in personal_memory:
-            print(f"Assistant: Your {memory_key.replace('_', ' ')} is {personal_memory[memory_key]}.")
-        else:
-            print(f"Assistant: I don't have anything saved for {memory_key.replace('_', ' ')}.")
-        return
-
-    if command_lower.startswith("what's my "):
-        memory_key = command_lower[10:].strip(" ?.!").replace(" ", "_")
-
-        if memory_key in personal_memory:
-            print(f"Assistant: Your {memory_key.replace('_', ' ')} is {personal_memory[memory_key]}.")
-        else:
-            print(f"Assistant: I don't have anything saved for {memory_key.replace('_', ' ')}.")
         return
         # Reliable file listing commands
     if command_lower == "list downloads":
