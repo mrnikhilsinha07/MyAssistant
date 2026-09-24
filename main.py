@@ -438,6 +438,7 @@ def validate_action(action):
     allowed_actions = {
         "open_app",
         "type_text",
+        "press_key",
         "move_mouse",
         "close_app",
         "open_folder",
@@ -525,6 +526,15 @@ def execute_action(action):
             print("Assistant: Failed to type the requested text.")
             res = "Failed to type the requested text."
 
+    elif action_type == "press_key":
+        try:
+            pyautogui.press(target)
+            print(f"Assistant: Pressed the {target} key.")
+            res = f"Pressed the {target} key."
+        except Exception:
+            print("Assistant: Failed to press the requested key.")
+            res = "Failed to press the requested key."
+        
     elif action_type == "move_mouse":
         try:
             target_lower = target.strip().lower()
@@ -1049,6 +1059,7 @@ Always choose the action based on the user's INTENT.
                             "close_app",
                             "move_mouse",
                             "type_text",
+                            "press_key",
                             "open_folder",
                             "list_files",
                             "count_files",
