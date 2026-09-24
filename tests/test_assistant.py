@@ -199,6 +199,13 @@ class TestPhase2Optimizations(unittest.TestCase):
         self.assertTrue(any("time" in r.lower() for r in res))
         self.assertIn("Displayed help", res)
 
-
+    def test_web_search(self):
+        results = main.web_search("Python programming", num_results=2)
+        self.assertIsInstance(results, list)
+        self.assertGreater(len(results), 0)
+        self.assertIn("title", results[0])
+        self.assertIn("url", results[0])
+        self.assertIn("snippet", results[0])
+        
 if __name__ == "__main__":
     unittest.main()

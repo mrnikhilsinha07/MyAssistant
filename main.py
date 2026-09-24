@@ -8,14 +8,83 @@ from pathlib import Path
 import ollama
 import pyautogui
 import memory_manager
+from ddgs import DDGS
+import ctypes
 
+
+def web_search(query, num_results=5):
+    """Search the web using DDGS."""
+    try:
+        results = DDGS().text(
+            query,
+            max_results=num_results
+        )
+
+        formatted_results = []
+
+        for result in results:
+            formatted_results.append({
+                "title": result.get("title", ""),
+                "url": result.get("href", ""),
+                "snippet": result.get("body", "")
+            })
+
+        return formatted_results
+
+    except Exception as e:
+        print(f"Web search error: {e}")
+        return [{"error": str(e)}]
 # ==========================================
 # MY PERSONAL ASSISTANT
 # Stage 3: Local AI Brain + Computer Control
 # ==========================================
 
 MODEL = "qwen3:1.7b"
+def summarize_search_results(query, results):
+    """Summarize web search results using the local AI."""
+    try:
+        sources = []
 
+        for item in results[:5]:
+            sources.append(
+                f"Title: {item.get('title', '')}\n"
+                f"Snippet: {item.get('snippet', '')}\n"
+                f"URL: {item.get('url', '')}"
+            )
+
+        prompt = f"""
+Summarize the following web search results for the user.
+
+User query:
+{query}
+
+Search results:
+{chr(10).join(sources)}
+
+Rules:
+- Give a concise factual summary.
+- Use only information contained in the provided search results.
+- Do not invent facts.
+- Mention important differences or uncertainty when present.
+- Do not include unnecessary filler.
+"""
+
+        response = ollama.chat(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            think=False
+        )
+
+        return response["message"]["content"].strip()
+
+    except Exception as e:
+        print(f"Web summary error: {e}")
+        return ""
 # Personal memory
 PERSONAL_MEMORY_FILE = os.path.join(
     os.path.dirname(__file__),
@@ -94,7 +163,13 @@ def open_application(app_name):
         return False
 
     try:
-        subprocess.Popen(APPS[app_name])
+        process = subprocess.Popen(APPS[app_name])
+
+        time.sleep(0.5)
+
+        if app_name == "notepad":
+            ctypes.windll.user32.SetForegroundWindow(process.pid)
+
         print(f"Assistant: Opening {app_name}.")
         return True
     except Exception as error:
@@ -362,6 +437,7 @@ def validate_action(action):
 
     allowed_actions = {
         "open_app",
+        "type_text",
         "move_mouse",
         "close_app",
         "open_folder",
@@ -373,7 +449,8 @@ def validate_action(action):
         "help",
         "remember",
         "recall",
-        "chat"
+        "chat",
+        "web_search"
     }
 
     if action_type not in allowed_actions:
@@ -439,15 +516,57 @@ def execute_action(action):
         success = open_application(target)
         res = f"Opened {target}" if success else f"Failed to open {target}"
 
+    elif action_type == "type_text":
+        try:
+            pyautogui.write(target, interval=0.02)
+            print("Assistant: Typed the requested text.")
+            res = "Typed the requested text."
+        except Exception:
+            print("Assistant: Failed to type the requested text.")
+            res = "Failed to type the requested text."
+
     elif action_type == "move_mouse":
         try:
-            x, y = target.split(",")
-            success = move_mouse(x.strip(), y.strip())
-            res = f"Moved mouse to ({x.strip()}, {y.strip()})" if success else "Failed to move mouse"
+            target_lower = target.strip().lower()
+
+            screen_width, screen_height = pyautogui.size()
+
+            if target_lower == "center":
+                x = screen_width // 2
+                y = screen_height // 2
+
+            elif target_lower == "top-left":
+                x = 0
+                y = 0
+
+            elif target_lower == "top-right":
+                x = screen_width - 1
+                y = 0
+
+            elif target_lower == "bottom-left":
+                x = 0
+                y = screen_height - 1
+
+            elif target_lower == "bottom-right":
+                x = screen_width - 1
+                y = screen_height - 1
+
+            else:
+                x, y = target.split(",")
+                x = int(x.strip())
+                y = int(y.strip())
+
+            success = move_mouse(x, y)
+
+            res = (
+                f"Moved mouse to ({x}, {y})"
+                if success
+                else "Failed to move mouse"
+            )
+
         except Exception:
             print("Assistant: Invalid mouse position.")
             res = "Invalid mouse position"
-
     elif action_type == "close_app":
         success = close_application(target)
         res = f"Closed {target}" if success else f"Failed to close {target}"
@@ -500,9 +619,30 @@ def execute_action(action):
         print(f"Assistant: {resp}")
         res = resp
 
-    else:
-        print("Assistant: I could not determine a safe action.")
-        res = "Unknown action"
+    elif action_type == "web_search":
+        results = web_search(target)
+
+        if results and not results[0].get("error"):
+            summary = summarize_search_results(target, results)
+
+            if summary:
+                print("Assistant: Web search summary:")
+                print(summary)
+                print()
+            else:
+                print("Assistant: I found results, but could not generate a summary.")
+
+            print("Sources:")
+            for item in results:
+                print(f"- {item.get('title', '')}")
+                print(f"  {item.get('url', '')}")
+
+            res = f"Found {len(results)} web search results for {target}"
+
+        else:
+            error = results[0].get("error", "Unknown search error") if results else "No results"
+            print(f"Assistant: Web search failed: {error}")
+            res = f"Web search failed for {target}"
 
     # Record action in security audit log
     status = "SUCCESS" if res and not str(res).startswith("Failed") and not str(res).startswith("Invalid") else "FAILED"
@@ -551,6 +691,7 @@ IMPORTANT:
 - Return exactly ONE JSON object containing an "actions" array.
 - The "actions" array must contain one or more safe actions in the exact order they should be executed.
 - Return VALID JSON only. Never return explanations, markdown, or extra text.
+- NEVER add an action that the user did not explicitly request or that is not required to complete the request.
 
 ALLOWED ACTIONS:
 
@@ -577,31 +718,35 @@ All of these mean open_app.
 
 2. MOVE MOUSE
 
-Use when the user explicitly asks you to move the mouse pointer to a screen position.
+Use when the user explicitly asks you to move the mouse pointer/cursor.
 
 JSON:
-{"action":"move_mouse","target":"500,300"}
+{"action":"move_mouse","target":"center"}
+
+TARGET RULES:
+
+- If the user gives exact X,Y coordinates, return those exact coordinates.
+- If the user says "center", "middle of the screen", or equivalent, return:
+  {"action":"move_mouse","target":"center"}
+- If the user says "top left", return:
+  {"action":"move_mouse","target":"top-left"}
+- If the user says "top right", return:
+  {"action":"move_mouse","target":"top-right"}
+- If the user says "bottom left", return:
+  {"action":"move_mouse","target":"bottom-left"}
+- If the user says "bottom right", return:
+  {"action":"move_mouse","target":"bottom-right"}
 
 IMPORTANT:
-- target must contain X,Y screen coordinates.
-- Example: "move the mouse to 500,300" means target "500,300".
-- Do not invent coordinates when the user has not provided a position.
-- If the user asks to click something or interact with something visually, do not use move_mouse yet.
-- ALWAYS identify the user's intended action before choosing an action.
-- If the user explicitly asks to move the mouse/pointer/cursor to coordinates, ALWAYS use move_mouse.
-- Never choose open_app unless the user is actually asking to launch an application.
-- Never choose an unrelated action just because an application name appears in the model's examples.
 
-HIGHEST PRIORITY INTENT RULES:
-
-- First determine exactly what action the user's sentence requests.
-- NEVER choose an unrelated action.
-- If the user asks to move, position, place, or move the mouse/cursor/pointer to coordinates, the action MUST be "move_mouse".
-- If the user provides coordinates such as "500,300", use those exact coordinates.
-- A mouse movement request must NEVER become "open_app".
-- Do not use examples from this prompt as the user's command.
-- Only select "open_app" when the user actually asks to open, launch, start, or run an application.
-
+- NEVER invent coordinates.
+- NEVER convert "center" into coordinates.
+- NEVER use 500,300 or any other example coordinates unless the user explicitly gives those coordinates.
+- The Python program calculates semantic screen positions such as center and corners.
+- Preserve exact coordinates when the user explicitly provides them.
+- If the user asks to move the mouse but gives no position, use the "chat" action and ask for the position.
+- Do not choose "open_app" for a mouse movement request.
+- Do not infer a mouse position from an application name.
 3. CLOSE APPLICATION
 Use when the user wants to close an allowed application.
 
@@ -688,7 +833,34 @@ If the user asks to SEE or LIST the files, use list_files.
 If the user asks HOW MANY files there are, use count_files.
 If the user asks to OPEN or GO TO the folder, use open_folder.
 
-6. LIST RUNNING APPLICATIONS
+6. WEB SEARCH
+
+Use when the user asks for information that requires searching the current internet.
+
+Examples:
+- "search the web for the latest AI news"
+- "find the latest news about NVIDIA"
+- "search for Python 3.13 documentation"
+- "look up today's weather"
+- "find information about a new laptop"
+- "what is the latest version of Ollama"
+- "search online for this"
+
+JSON:
+{"action":"web_search","target":"latest AI news"}
+
+IMPORTANT:
+- Use web_search when the user explicitly asks to search, look up, find online, or search the web.
+- Use web_search when the user asks for current or latest information that may have changed.
+- Put the complete search query in target.
+- Do NOT use web_search for normal conversation or questions that can be answered without an internet search.
+- Do NOT invent search results.
+- web_search only searches the internet; it does not execute commands or open applications.
+- If the user asks to search the web and summarize, explain, or report the search results, use ONLY the web_search action.
+- Do NOT add a separate chat action for summarizing search results.
+- The web_search action automatically summarizes the retrieved results.
+
+7. LIST RUNNING APPLICATIONS
 Use when the user asks what applications, programs, or apps are currently running or open on the computer.
 
 JSON:
@@ -703,7 +875,7 @@ Examples:
 
 These mean list_running_apps.
 
-6.5 CURRENT TIME
+7.5 CURRENT TIME
 
 Use when the user asks for the current time, asks what time it is, or asks to know the time right now.
 
@@ -876,6 +1048,7 @@ Always choose the action based on the user's INTENT.
                             "open_app",
                             "close_app",
                             "move_mouse",
+                            "type_text",
                             "open_folder",
                             "list_files",
                             "count_files",
@@ -885,7 +1058,8 @@ Always choose the action based on the user's INTENT.
                             "help",
                             "remember",
                             "recall",
-                            "chat"
+                            "chat",
+                            "web_search"
                         ]
                     },
                     "target": {
@@ -913,6 +1087,16 @@ Always choose the action based on the user's INTENT.
         print(f"AI processing time: {ai_elapsed_time:.2f} seconds.")
         content = response["message"]["content"]
         action = json.loads(content)
+        # Remove redundant chat actions when web search already provides the summary.
+        if isinstance(action, dict) and isinstance(action.get("actions"), list):
+            if any(item.get("action") == "web_search" for item in action["actions"] if isinstance(item, dict)):
+                action["actions"] = [
+                    item for item in action["actions"]
+                    if not (
+                        isinstance(item, dict)
+                        and item.get("action") == "chat"
+                    )
+                ]
         print("AI ACTION:", action)
 
         # Safety guard: reject unrelated actions for destructive requests
