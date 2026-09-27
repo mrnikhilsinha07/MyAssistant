@@ -40,6 +40,7 @@ def web_search(query, num_results=5):
 # ==========================================
 
 MODEL = "qwen3:1.7b"
+OLLAMA_CLIENT = ollama.Client(host="http://127.0.0.1:11434", timeout=30)
 def summarize_search_results(query, results):
     """Summarize web search results using the local AI."""
     try:
@@ -69,7 +70,7 @@ Rules:
 - Do not include unnecessary filler.
 """
 
-        response = ollama.chat(
+        response = OLLAMA_CLIENT.chat(
             model=MODEL,
             messages=[
                 {
@@ -564,26 +565,18 @@ def create_file(file_name):
 
 
 def write_file(file_name, content):
-    """Write text safely to a file inside the user's Documents folder."""
+    """Write text safely to a file inside Documents."""
     file_name = file_name.strip().strip('"\'')
     if not file_name:
         print("Assistant: Please provide a file name.")
         return False
 
     relative_name = file_name.replace("\\", "/")
-    if re.search(r'(^|/)\.\.(?:/|$)', relative_name):
-        print("Assistant: Blocked unsafe file path.")
-        return False
-
-    if re.search(r'[<>:"|?*]', Path(relative_name).name):
-        print("Assistant: File name contains invalid characters.")
-        return False
-
-    documents_path = Path(get_folders()["documents"]).resolve()
-    target_path = (documents_path / relative_name).resolve()
+    docs_dir = Path(os.path.expanduser("~")) / "Documents"
+    target_path = (docs_dir / relative_name).resolve()
 
     try:
-        target_path.relative_to(documents_path)
+        target_path.relative_to(docs_dir.resolve())
     except ValueError:
         print("Assistant: Blocked file write outside Documents.")
         return False
@@ -591,10 +584,11 @@ def write_file(file_name, content):
     try:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(str(content), encoding="utf-8")
-        print(f"Assistant: Wrote content to {file_name}.")
+        print(f"Assistant: Wrote the requested text to '{file_name}'.")
         return True
     except Exception as error:
-        print(f"Assistant: I could not write the file: {error}")
+        print("Assistant: I could not write the file.")
+        print(f"System error: {error}")
         return False
 
 
@@ -708,19 +702,27 @@ def validate_action(action):
         print(f"Assistant: Blocked unknown action '{action_type}'.")
         return False
 
-    # Application targets are resolved dynamically.
-    # No hard-coded application whitelist is required.
+    # Application control is intentionally limited to applications that JARVIS
+    # explicitly supports. This prevents commands such as cmd.exe, powershell,
+    # regedit, format, curl, or python from being launched through AI output.
     if action_type in {"open_app", "close_app"}:
-        if not target or not target.strip():
-            print("Assistant: No application was specified.")
+        allowed_apps = {
+            "chrome",
+            "notepad",
+            "calculator",
+            "calculator app",
+            "explorer",
+            "file explorer",
+        }
+        target_clean = str(target).strip().lower()
+        if target_clean not in allowed_apps:
+            print(f"Assistant: Blocked unsupported application '{target}'.")
             return False
-    
-    # Validate folder targets
-    if action_type in {
-        "open_folder",
-        "list_files",
-        "count_files"
-    }:
+        return True
+
+    # Validate folder targets. Standard user folders are allowed, and custom
+    # folders are allowed only when they are descendants of Documents.
+    if action_type in {"open_folder", "list_files", "count_files"}:
         allowed_folders = {
             "downloads",
             "documents",
@@ -730,47 +732,37 @@ def validate_action(action):
             "music"
         }
 
-        target_clean = target.strip().lower()
+        target_clean = str(target).strip().lower().replace("\\", "/")
 
-        # Standard Windows user folders are always allowed
         if target_clean in allowed_folders:
             return True
 
-        # Allow folders that actually exist inside the user's Documents folder
-        documents_path = get_folders()["documents"]
-
-        try:
-            folder_path = os.path.join(documents_path, target.strip())
-
-            if os.path.isdir(folder_path):
-                return True
-        except Exception:
-            pass
-
-        print(f"Assistant: Blocked unknown folder '{target}'.")
-        return False
-        print(f"Assistant: Blocked unknown folder '{target}'.")
-        return False
-
-    # Validate file-write targets. Writes are restricted to Documents.
-    if action_type == "write_file":
-        file_target = target.strip().replace("\\", "/")
-        if not file_target:
-            print("Assistant: No file was specified.")
+        # Never allow absolute paths, drive-qualified paths, or traversal.
+        target_path = Path(target_clean)
+        if (target_path.is_absolute() or
+                ":" in target_clean.split("/")[0] or
+                any(part == ".." for part in target_path.parts)):
+            print(f"Assistant: Blocked unsafe folder path '{target}'.")
             return False
-        if file_target.lower().startswith("documents/"):
-            file_target = file_target[len("documents/"):]
+
         documents_path = Path(get_folders()["documents"]).resolve()
-        file_path = (documents_path / file_target).resolve()
+        candidate = (documents_path / target_clean).resolve()
+
         try:
-            file_path.relative_to(documents_path)
+            candidate.relative_to(documents_path)
         except ValueError:
-            print(f"Assistant: Blocked file write outside Documents '{target}'.")
+            print(f"Assistant: Blocked folder outside Documents '{target}'.")
             return False
+
+        if candidate.is_dir():
+            return True
+
+        print(f"Assistant: Blocked unknown folder '{target}'.")
+        return False
 
     # Validate file-read targets. Reads are restricted to existing files inside Documents.
     if action_type == "read_file":
-        file_target = target.strip().replace("\\", "/")
+        file_target = str(target).strip().replace("\\", "/")
         if not file_target:
             print("Assistant: No file was specified.")
             return False
@@ -920,7 +912,7 @@ def execute_action(action):
 
     elif action_type == "write_file":
         success = write_file(target, action.get("value", ""))
-        res = f"Wrote file {target}" if success else f"Failed to write {target}"
+        res = f"Wrote to {target}" if success else f"Failed to write to {target}"
 
     elif action_type == "read_file":
         content = read_file(target)
@@ -1250,19 +1242,6 @@ IMPORTANT:
 - A path containing a folder name does not mean the target itself is a folder.
 - "create JARVIS_Test/test.txt" means create a FILE named test.txt inside JARVIS_Test.
 
-7.1 WRITE FILE
-
-Use when the user explicitly asks to write, save, put, or replace text in a file.
-
-JSON:
-{"action":"write_file","target":"JARVIS_Test/test.txt","value":"Hello JARVIS"}
-
-IMPORTANT:
-- Use "write_file" for writing content into a file.
-- Do NOT use create_folder, create_file, or read_file for a write request.
-- The target is relative to Documents.
-- Preserve the requested text exactly in "value".
-
 7. CREATE FOLDER
 Use when the user wants to create a new folder.
 
@@ -1420,7 +1399,7 @@ Always choose the action based on the user's INTENT.
             }
         )
         ai_start_time = time.perf_counter()
-        response = ollama.chat(
+        response = OLLAMA_CLIENT.chat(
             model=MODEL,
             messages=messages,
             format={
@@ -1648,26 +1627,25 @@ def process_command(command):
     # otherwise "Documents/JARVIS_Test" gets mistaken for "Documents".
 
     # RELIABLE WRITE-FILE COMMANDS
-    # Handle explicit natural-language write requests without relying on the local model.
-    write_match = re.search(
-        r'^\s*write\s+([\'"])(.*?)\1\s+into\s+(.+?)\s+inside\s+(.+?)\s*$',
+    write_file_match = re.search(
+        r'^\s*write\s+(?:"([^"]*)"|\'([^\']*)\')\s+into\s+(.+?)\s+inside\s+(.+?)\s*$',
         command,
-        re.IGNORECASE | re.DOTALL
+        re.IGNORECASE
     )
 
-    if write_match:
-        content = write_match.group(2)
-        filename = write_match.group(3).strip().strip('"\'')
-        folder = write_match.group(4).strip().rstrip('/\\')
-        requested_file = f"{folder}/{filename}"
-        requested_file = re.sub(
-            r'^Documents[\\/]',
-            '',
-            requested_file,
-            flags=re.IGNORECASE
-        ).replace("\\", "/")
+    if write_file_match:
+        content = write_file_match.group(1)
+        if content is None:
+            content = write_file_match.group(2)
 
+        filename = write_file_match.group(3).strip().strip('"\'')
+        folder = write_file_match.group(4).strip().strip('"\'')
+        folder = re.sub(r'\s+folder\s*$', '', folder, flags=re.IGNORECASE).strip()
+        folder = re.sub(r'^Documents[\\/]', '', folder, flags=re.IGNORECASE)
+
+        requested_file = f"{folder}/{filename}".replace("\\", "/")
         print(f"Assistant: Direct write-file request -> {requested_file}")
+
         return execute_action({
             "action": "write_file",
             "target": requested_file,
@@ -1981,7 +1959,7 @@ def process_command(command):
 def main():
     print("Loading local AI...")
     try:
-        ollama.chat(
+        OLLAMA_CLIENT.chat(
             model=MODEL,
             messages=[{"role": "user", "content": "Reply with OK only."}]
         )
@@ -2003,7 +1981,14 @@ def main():
     print()
 
     while True:
-        command = input("You: ")
+        try:
+            command = input("You: ")
+        except KeyboardInterrupt:
+            print("\nAssistant: Interrupted. Shutting down.")
+            break
+        except EOFError:
+            print("\nAssistant: Input closed. Shutting down.")
+            break
 
         start_time = time.perf_counter()
 
