@@ -134,7 +134,46 @@ def get_folders():
         "videos": os.path.join(home, "Videos"),
         "music": os.path.join(home, "Music"),
     }
+def resolve_folder_path(folder_name):
+    """Resolve an allowed folder or a subfolder inside an allowed location."""
+    folders = get_folders()
+    folder_name = folder_name.strip()
 
+    # Direct approved folder
+    key = folder_name.lower()
+    if key in folders:
+        return folders[key]
+
+    # Allow subfolders inside approved locations
+    normalized = folder_name.replace("\\", "/")
+
+    for base_name, base_path in folders.items():
+        prefix = base_name + "/"
+
+        if normalized.lower().startswith(prefix):
+            relative_path = normalized[len(prefix):]
+            candidate = os.path.abspath(
+                os.path.join(base_path, relative_path)
+            )
+
+            base_path_abs = os.path.abspath(base_path)
+
+            # Security: never allow escaping the approved folder
+            if os.path.commonpath([candidate, base_path_abs]) == base_path_abs:
+                return candidate
+        # Allow relative folders inside Documents.
+    # Example: "JARVIS_Test" means Documents/JARVIS_Test.
+    documents_path = os.path.abspath(folders["documents"])
+    candidate = os.path.abspath(
+        os.path.join(documents_path, folder_name)
+    )
+
+    try:
+        if os.path.commonpath([candidate, documents_path]) == documents_path:
+            return candidate
+    except ValueError:
+        pass
+    return None
 
 def move_mouse(x, y):
     try:
@@ -156,27 +195,91 @@ def move_mouse(x, y):
         return False
     
 def open_application(app_name):
-    app_name = app_name.strip().lower()
+    """
+    Dynamically find and open Windows applications.
+    No application needs to be manually added to APPS.
+    """
+    app_name = app_name.strip()
 
-    if app_name not in APPS:
-        print(f"Assistant: I am not allowed to open '{app_name}'.")
+    if not app_name:
+        print("Assistant: Please specify an application.")
         return False
 
     try:
-        process = subprocess.Popen(APPS[app_name])
+        # 1. Try Windows Start Menu applications automatically
+        safe_name = app_name.replace("'", "''")
 
-        time.sleep(0.5)
+        powershell_command = (
+            f"(Get-StartApps | "
+            f"Where-Object {{ $_.Name -like '*{safe_name}*' }} | "
+            f"Select-Object -First 1 -ExpandProperty AppID)"
+        )
 
-        if app_name == "notepad":
-            ctypes.windll.user32.SetForegroundWindow(process.pid)
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                powershell_command
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
 
-        print(f"Assistant: Opening {app_name}.")
-        return True
-    except Exception as error:
-        print(f"Assistant: I could not open {app_name}.")
-        print(f"System error: {error}")
+        app_id = result.stdout.strip()
+
+        if app_id:
+            subprocess.Popen(
+                [
+                    "explorer.exe",
+                    f"shell:AppsFolder\\{app_id}"
+                ]
+            )
+
+            print(f"Assistant: Opening {app_name}.")
+            return True
+
+        # 2. If not found in Start Menu, try Windows PATH
+        try:
+            subprocess.Popen(
+                app_name,
+                shell=True
+            )
+
+            time.sleep(0.5)
+
+            print(f"Assistant: Opening {app_name}.")
+            return True
+
+        except Exception:
+            pass
+
+        # 3. Try Windows Run command
+        try:
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", app_name],
+                shell=False
+            )
+
+            time.sleep(0.5)
+
+            print(f"Assistant: Opening {app_name}.")
+            return True
+
+        except Exception:
+            pass
+
+        print(f"Assistant: I could not find '{app_name}' on this PC.")
         return False
 
+    except Exception as error:
+        print(f"Assistant: Could not open {app_name}.")
+        print(f"System error: {error}")
+        return False
+    
 def close_application(app_name):
     app_name = app_name.strip().lower()
 
@@ -210,51 +313,78 @@ def close_application(app_name):
 
 def open_folder(folder_name):
     folders = get_folders()
-    folder_name = folder_name.strip().lower()
+    folder_name = folder_name.strip()
 
-    if folder_name not in folders:
-        print(f"Assistant: I don't have permission to open '{folder_name}'.")
-        return False
+    # 1. Open standard folders directly
+    folder_key = folder_name.lower()
 
-    path = folders[folder_name]
+    if folder_key in folders:
+        path = folders[folder_key]
 
-    if os.path.exists(path):
-        os.startfile(path)
-        print(f"Assistant: Opening your {folder_name} folder.")
-        return True
-    else:
+        if os.path.exists(path):
+            os.startfile(path)
+            print(f"Assistant: Opening your {folder_name} folder.")
+            return True
+
         print(f"Assistant: I could not find your {folder_name} folder.")
         return False
 
+    # 2. Search inside allowed folders
+    search_roots = [
+        folders["documents"],
+        folders["downloads"],
+        folders["desktop"],
+        folders["pictures"],
+        folders["videos"],
+        folders["music"],
+    ]
+
+    for root in search_roots:
+        if not os.path.exists(root):
+            continue
+
+        try:
+            for current_root, dirs, files in os.walk(root):
+                for directory in dirs:
+                    if directory.lower() == folder_key:
+                        path = os.path.join(current_root, directory)
+                        os.startfile(path)
+                        print(f"Assistant: Opening {folder_name}.")
+                        return True
+
+        except Exception:
+            continue
+
+    print(f"Assistant: I could not find the '{folder_name}' folder.")
+    return False
 
 def list_files(folder_name):
-    folders = get_folders()
-    folder_name = folder_name.strip().lower()
+    path = resolve_folder_path(folder_name)
 
-    if folder_name not in folders:
+    if path is None:
         print(f"Assistant: I don't have access to '{folder_name}'.")
         return []
 
-    path = folders[folder_name]
-
     if not os.path.exists(path):
-        print(f"Assistant: I could not find your {folder_name} folder.")
+        print(f"Assistant: I could not find '{folder_name}'.")
         return []
 
     try:
         items = os.listdir(path)
+
         print(f"\nAssistant: Contents of {folder_name}:")
         if not items:
-            print("  The folder is empty.")
+            print("  - The folder is empty.")
         else:
             for item in items:
                 print(f"  - {item}")
+
         print()
         return items
+
     except Exception as e:
         print(f"Assistant: Could not read {folder_name}: {e}")
         return []
-
 
 def count_files(folder_name):
     folders = get_folders()
@@ -389,6 +519,122 @@ def create_folder(folder_name):
         print("Assistant: I could not create the folder.")
         print(f"System error: {error}")
 
+def create_file(file_name):
+    file_name = file_name.strip()
+
+    if not file_name:
+        print("Assistant: Please provide a file name.")
+        return False
+
+    # Prevent invalid Windows filename characters
+    if re.search(r'[<>:"\\|?*]', file_name):
+        print("Assistant: File name contains invalid characters.")
+        return False
+
+    docs_dir = Path(os.path.expanduser("~")) / "Documents"
+
+    # Allow a path such as JARVIS_Test/test.txt
+    target_path = (docs_dir / file_name).resolve()
+
+    # Keep the file strictly inside Documents
+    try:
+        target_path.relative_to(docs_dir.resolve())
+    except ValueError:
+        print("Assistant: Blocked file creation outside your Documents folder.")
+        return False
+
+    # Make sure the parent folder exists
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if target_path.exists():
+        print(f"Assistant: '{file_name}' already exists.")
+        return False
+
+    try:
+        target_path.touch()
+
+        print(f"Assistant: Created file '{file_name}' inside your Documents folder.")
+        return True
+
+    except Exception as error:
+        print("Assistant: I could not create the file.")
+        print(f"System error: {error}")
+        return False
+
+
+
+def write_file(file_name, content):
+    """Write text safely to a file inside the user's Documents folder."""
+    file_name = file_name.strip().strip('"\'')
+    if not file_name:
+        print("Assistant: Please provide a file name.")
+        return False
+
+    relative_name = file_name.replace("\\", "/")
+    if re.search(r'(^|/)\.\.(?:/|$)', relative_name):
+        print("Assistant: Blocked unsafe file path.")
+        return False
+
+    if re.search(r'[<>:"|?*]', Path(relative_name).name):
+        print("Assistant: File name contains invalid characters.")
+        return False
+
+    documents_path = Path(get_folders()["documents"]).resolve()
+    target_path = (documents_path / relative_name).resolve()
+
+    try:
+        target_path.relative_to(documents_path)
+    except ValueError:
+        print("Assistant: Blocked file write outside Documents.")
+        return False
+
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(str(content), encoding="utf-8")
+        print(f"Assistant: Wrote content to {file_name}.")
+        return True
+    except Exception as error:
+        print(f"Assistant: I could not write the file: {error}")
+        return False
+
+
+def read_file(file_name):
+    """Read a text file safely from inside the user's Documents folder."""
+    file_name = file_name.strip().strip('"\'')
+    if not file_name:
+        print("Assistant: Please provide a file name.")
+        return ""
+
+    relative_name = file_name.replace("\\", "/")
+    docs_dir = Path(os.path.expanduser("~")) / "Documents"
+    target_path = (docs_dir / relative_name).resolve()
+
+    try:
+        target_path.relative_to(docs_dir.resolve())
+    except ValueError:
+        print("Assistant: Blocked file read outside your Documents folder.")
+        return ""
+
+    if not target_path.exists():
+        print(f"Assistant: I could not find '{file_name}'.")
+        return ""
+
+    if not target_path.is_file():
+        print(f"Assistant: '{file_name}' is not a file.")
+        return ""
+
+    try:
+        content = target_path.read_text(encoding="utf-8")
+        print(f"\nAssistant: Contents of {file_name}:")
+        print(content if content else "  - The file is empty.")
+        print()
+        return content
+    except UnicodeDecodeError:
+        print("Assistant: This file is not a UTF-8 text file.")
+        return ""
+    except Exception as error:
+        print(f"Assistant: I could not read the file: {error}")
+        return ""
 
 def show_help():
     print()
@@ -447,6 +693,9 @@ def validate_action(action):
         "count_files",
         "list_running_apps",
         "create_folder",
+        "create_file",
+        "write_file",
+        "read_file",
         "time",
         "help",
         "remember",
@@ -459,21 +708,13 @@ def validate_action(action):
         print(f"Assistant: Blocked unknown action '{action_type}'.")
         return False
 
-    # Validate application targets
+    # Application targets are resolved dynamically.
+    # No hard-coded application whitelist is required.
     if action_type in {"open_app", "close_app"}:
-        allowed_apps = {
-            "chrome",
-            "notepad",
-            "calculator",
-            "calculator app",
-            "explorer",
-            "file explorer"
-        }
-
-        if target.lower().strip() not in allowed_apps:
-            print(f"Assistant: Blocked unknown application '{target}'.")
+        if not target or not target.strip():
+            print("Assistant: No application was specified.")
             return False
-
+    
     # Validate folder targets
     if action_type in {
         "open_folder",
@@ -489,11 +730,71 @@ def validate_action(action):
             "music"
         }
 
-        if target.lower().strip() not in allowed_folders:
-            print(f"Assistant: Blocked unknown folder '{target}'.")
+        target_clean = target.strip().lower()
+
+        # Standard Windows user folders are always allowed
+        if target_clean in allowed_folders:
+            return True
+
+        # Allow folders that actually exist inside the user's Documents folder
+        documents_path = get_folders()["documents"]
+
+        try:
+            folder_path = os.path.join(documents_path, target.strip())
+
+            if os.path.isdir(folder_path):
+                return True
+        except Exception:
+            pass
+
+        print(f"Assistant: Blocked unknown folder '{target}'.")
+        return False
+        print(f"Assistant: Blocked unknown folder '{target}'.")
+        return False
+
+    # Validate file-write targets. Writes are restricted to Documents.
+    if action_type == "write_file":
+        file_target = target.strip().replace("\\", "/")
+        if not file_target:
+            print("Assistant: No file was specified.")
+            return False
+        if file_target.lower().startswith("documents/"):
+            file_target = file_target[len("documents/"):]
+        documents_path = Path(get_folders()["documents"]).resolve()
+        file_path = (documents_path / file_target).resolve()
+        try:
+            file_path.relative_to(documents_path)
+        except ValueError:
+            print(f"Assistant: Blocked file write outside Documents '{target}'.")
             return False
 
+    # Validate file-read targets. Reads are restricted to existing files inside Documents.
+    if action_type == "read_file":
+        file_target = target.strip().replace("\\", "/")
+        if not file_target:
+            print("Assistant: No file was specified.")
+            return False
+
+        if file_target.lower().startswith("documents/"):
+            file_target = file_target[len("documents/"):]
+
+        documents_path = Path(get_folders()["documents"]).resolve()
+        file_path = (documents_path / file_target).resolve()
+
+        try:
+            file_path.relative_to(documents_path)
+        except ValueError:
+            print(f"Assistant: Blocked file read outside Documents '{target}'.")
+            return False
+
+        if not file_path.is_file():
+            print(f"Assistant: Blocked unknown file '{target}'.")
+            return False
+
+    # All other allowed actions are valid.
     return True
+
+
 def execute_action(action):
     if not validate_action(action):
         return None
@@ -612,6 +913,18 @@ def execute_action(action):
         folder_name = target.replace("Documents/", "", 1).replace("Documents\\", "", 1)
         create_folder(folder_name)
         res = f"Created folder {target}"
+
+    elif action_type == "create_file":
+        success = create_file(target)
+        res = f"Created file {target}" if success else f"Failed to create {target}"
+
+    elif action_type == "write_file":
+        success = write_file(target, action.get("value", ""))
+        res = f"Wrote file {target}" if success else f"Failed to write {target}"
+
+    elif action_type == "read_file":
+        content = read_file(target)
+        res = f"Read file {target}" if content != "" else f"Read file {target} (empty or unavailable)"
 
     elif action_type == "time":
         current_time = datetime.now().strftime("%I:%M %p")
@@ -914,6 +1227,42 @@ Examples:
 
 These all mean time.
 
+7. CREATE FILE
+
+Use when the user wants to create a new file.
+
+Examples:
+- "create a file named test.txt"
+- "make a file called notes.txt"
+- "create test.txt inside JARVIS_Test"
+- "make JARVIS_Test/test.txt"
+
+JSON:
+{"action":"create_file","target":"test.txt"}
+
+For a file inside a folder:
+{"action":"create_file","target":"JARVIS_Test/test.txt"}
+
+IMPORTANT:
+- If the user asks to create a FILE, always use "create_file".
+- If the user asks to create a FOLDER, use "create_folder".
+- Never use "create_folder" for a file.
+- A path containing a folder name does not mean the target itself is a folder.
+- "create JARVIS_Test/test.txt" means create a FILE named test.txt inside JARVIS_Test.
+
+7.1 WRITE FILE
+
+Use when the user explicitly asks to write, save, put, or replace text in a file.
+
+JSON:
+{"action":"write_file","target":"JARVIS_Test/test.txt","value":"Hello JARVIS"}
+
+IMPORTANT:
+- Use "write_file" for writing content into a file.
+- Do NOT use create_folder, create_file, or read_file for a write request.
+- The target is relative to Documents.
+- Preserve the requested text exactly in "value".
+
 7. CREATE FOLDER
 Use when the user wants to create a new folder.
 
@@ -921,6 +1270,25 @@ JSON:
 {"action":"create_folder","target":"MyFolder"}
 
 Only create folders inside the allowed Documents location.
+
+7.25 READ FILE
+
+Use when the user explicitly wants to read, display, show, or inspect the contents of a file.
+
+JSON:
+{"action":"read_file","target":"JARVIS_New/hello.txt"}
+
+Examples:
+- "read the file hello.txt inside Documents/JARVIS_New"
+- "show me the contents of hello.txt in JARVIS_New"
+- "read JARVIS_New/hello.txt"
+
+IMPORTANT:
+- Always use "read_file" for a request to read file contents.
+- Do NOT use "open_folder" for a read-file request.
+- Do NOT use "create_file" or "create_folder" for a read-file request.
+- The target must be the file path relative to Documents.
+- If the user says "Documents/JARVIS_New/hello.txt", return "JARVIS_New/hello.txt".
 
 8. HELP
 
@@ -1077,6 +1445,9 @@ Always choose the action based on the user's INTENT.
                             "count_files",
                             "list_running_apps",
                             "create_folder",
+                            "create_file",
+                            "write_file",
+                            "read_file",
                             "time",
                             "help",
                             "remember",
@@ -1120,8 +1491,96 @@ Always choose the action based on the user's INTENT.
                         and item.get("action") == "chat"
                     )
                 ]
-        print("AI ACTION:", action)
+        # Safety/correction layer: enforce the user's requested file operation.
+        if (
+            "create a file" in user_message.lower()
+            or "make a file" in user_message.lower()
+        ):
+            if isinstance(action, dict) and isinstance(action.get("actions"), list):
 
+                # Find the actual filename requested by the user.
+                import re
+
+                filename_match = re.search(
+                r'(?:named|called)\s+["\']?([A-Za-z0-9_.-]+\.(?:txt|py|html|css|js|json|csv|md|pdf|docx|xlsx|jpg|jpeg|png|gif))["\']?',
+                user_message,
+                re.IGNORECASE
+            )
+
+                if filename_match:
+                    requested_filename = filename_match.group(1).strip()
+
+                    # Find the folder mentioned after "inside" or "in".
+                    # Find the folder/path mentioned after "inside" or "in".
+                    folder_match = re.search(
+                        r'\b(?:inside|in)\s+([A-Za-z0-9 _./\\-]+?)(?:\s+folder)?\s*$',
+                        user_message,
+                        re.IGNORECASE
+                    )
+
+                    if folder_match:
+                        requested_folder = folder_match.group(1).strip()
+
+                        # The file functions already work relative to Documents.
+                        # Remove the Documents prefix if the user included it.
+                        requested_folder = re.sub(
+                            r'^Documents[\\/]',
+                            '',
+                            requested_folder,
+                            flags=re.IGNORECASE
+                        )
+
+                        requested_target = f"{requested_folder}/{requested_filename}"
+                    else:
+                        requested_target = requested_filename
+
+                    
+
+                    # For a file request, keep ONLY the create_file action.
+                    action["actions"] = [
+                        {
+                            "action": "create_file",
+                            "target": requested_target
+                        }
+                    ]
+
+                    print(
+                        f"Assistant: Corrected file request -> {requested_target}"
+                    )
+        print("AI ACTION:", action)
+        # Safety/correction layer for list-files requests.
+        if "list files" in user_message.lower() or "show files" in user_message.lower():
+            if isinstance(action, dict) and isinstance(action.get("actions"), list):
+                import re
+
+                list_folder_match = re.search(
+                    r'\b(?:inside|in)\s+([A-Za-z0-9_./\\-]+?)(?:\s+folder)?\s*$',
+                    user_message,
+                    re.IGNORECASE
+                )
+
+                if list_folder_match:
+                    requested_folder = list_folder_match.group(1).strip()
+
+                    # list_files() works relative to Documents.
+                    requested_folder = re.sub(
+                        r'^Documents[\\/]',
+                        '',
+                        requested_folder,
+                        flags=re.IGNORECASE
+                    )
+
+                    action["actions"] = [
+                        {
+                            "action": "list_files",
+                            "target": requested_folder
+                        }
+                    ]
+
+                    print(
+                        f"Assistant: Corrected list-files request -> "
+                        f"{requested_folder}"
+                    )
         # Safety guard: reject unrelated actions for destructive requests
         destructive_words = (
             "delete",
@@ -1183,6 +1642,111 @@ def process_command(command):
         return execute_action({
             "action": "list_running_apps",
             "target": ""
+        })
+    # FAST PATH: list files in a specific folder/path.
+    # This must run before the generic folder-intent detector,
+    # otherwise "Documents/JARVIS_Test" gets mistaken for "Documents".
+
+    # RELIABLE WRITE-FILE COMMANDS
+    # Handle explicit natural-language write requests without relying on the local model.
+    write_match = re.search(
+        r'^\s*write\s+([\'"])(.*?)\1\s+into\s+(.+?)\s+inside\s+(.+?)\s*$',
+        command,
+        re.IGNORECASE | re.DOTALL
+    )
+
+    if write_match:
+        content = write_match.group(2)
+        filename = write_match.group(3).strip().strip('"\'')
+        folder = write_match.group(4).strip().rstrip('/\\')
+        requested_file = f"{folder}/{filename}"
+        requested_file = re.sub(
+            r'^Documents[\\/]',
+            '',
+            requested_file,
+            flags=re.IGNORECASE
+        ).replace("\\", "/")
+
+        print(f"Assistant: Direct write-file request -> {requested_file}")
+        return execute_action({
+            "action": "write_file",
+            "target": requested_file,
+            "value": content
+        })
+
+    # RELIABLE READ-FILE COMMANDS
+    # Handle explicit file-reading requests without relying on the local model.
+    read_file_match = re.search(
+        r'^\s*(?:read|show|display)\s+(?:the\s+)?file\s+(.+?)\s*$',
+        command,
+        re.IGNORECASE
+    )
+
+    if read_file_match:
+        requested_file = read_file_match.group(1).strip().strip('"\'')
+
+        inside_match = re.search(
+            r'^(.*?)\s+inside\s+(.+?)\s*$',
+            requested_file,
+            re.IGNORECASE
+        )
+        if inside_match:
+            filename = inside_match.group(1).strip()
+            folder = inside_match.group(2).strip().rstrip('/\\')
+            requested_file = f"{folder}/{filename}"
+
+        in_match = re.search(
+            r'^(.*?)\s+in\s+(.+?)\s*$',
+            requested_file,
+            re.IGNORECASE
+        )
+        if in_match and "/" not in requested_file and "\\" not in requested_file:
+            requested_file = f"{in_match.group(2).strip().rstrip('/\\')}/{in_match.group(1).strip()}"
+
+        requested_file = re.sub(
+            r'^Documents[\\/]',
+            '',
+            requested_file,
+            flags=re.IGNORECASE
+        ).replace("\\", "/")
+
+        print(f"Assistant: Direct read-file request -> {requested_file}")
+        return execute_action({
+            "action": "read_file",
+            "target": requested_file
+        })
+
+    list_path_match = re.search(
+        r'^\s*(?:list|show)\s+(?:the\s+)?files?\s+'
+        r'(?:inside|in|from|of)\s+(.+?)\s*$',
+        command,
+        re.IGNORECASE
+    )
+
+    if list_path_match:
+        requested_folder = list_path_match.group(1).strip().strip('"\'')
+        requested_folder = re.sub(
+            r'\s+folder\s*$',
+            '',
+            requested_folder,
+            flags=re.IGNORECASE
+        ).strip()
+
+        # The file functions work relative to Documents.
+        # Remove the Documents prefix when the user explicitly includes it.
+        requested_folder = re.sub(
+            r'^Documents[\\/]',
+            '',
+            requested_folder,
+            flags=re.IGNORECASE
+        ).strip()
+        print(
+            f"Assistant: Direct list-files request -> {requested_folder}"
+        )
+
+        return execute_action({
+            "action": "list_files",
+            "target": requested_folder
         })
 
     # FAST INTENT DETECTION
