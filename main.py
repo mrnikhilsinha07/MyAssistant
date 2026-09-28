@@ -314,45 +314,43 @@ def close_application(app_name):
 
 def open_folder(folder_name):
     folders = get_folders()
-    folder_name = folder_name.strip()
+    folder_name = str(folder_name).strip().strip('"\'')
 
-    # 1. Open standard folders directly
+    # Standard Windows user folders.
     folder_key = folder_name.lower()
-
     if folder_key in folders:
         path = folders[folder_key]
-
-        if os.path.exists(path):
+        if os.path.isdir(path):
             os.startfile(path)
             print(f"Assistant: Opening your {folder_name} folder.")
             return True
-
         print(f"Assistant: I could not find your {folder_name} folder.")
         return False
 
-    # 2. Search inside allowed folders
+    # Path-style/custom folders are resolved safely inside Documents.
+    resolved = resolve_folder_path(folder_name)
+    if resolved and os.path.isdir(resolved):
+        os.startfile(resolved)
+        print(f"Assistant: Opening {folder_name}.")
+        return True
+
+    # Backward-compatible fallback: search approved roots by folder name.
     search_roots = [
-        folders["documents"],
-        folders["downloads"],
-        folders["desktop"],
-        folders["pictures"],
-        folders["videos"],
-        folders["music"],
+        folders["documents"], folders["downloads"], folders["desktop"],
+        folders["pictures"], folders["videos"], folders["music"],
     ]
-
+    target_basename = folder_name.replace("\\", "/").rstrip("/").split("/")[-1].lower()
     for root in search_roots:
-        if not os.path.exists(root):
+        if not os.path.isdir(root):
             continue
-
         try:
-            for current_root, dirs, files in os.walk(root):
+            for current_root, dirs, _files in os.walk(root):
                 for directory in dirs:
-                    if directory.lower() == folder_key:
+                    if directory.lower() == target_basename:
                         path = os.path.join(current_root, directory)
                         os.startfile(path)
                         print(f"Assistant: Opening {folder_name}.")
                         return True
-
         except Exception:
             continue
 
@@ -491,10 +489,11 @@ def create_folder(folder_name):
         print("Assistant: Please provide a folder name.")
         return
 
-    # Sanitize invalid Windows filename/directory characters
-    if re.search(r'[<>:"/\\|?*]', folder_name):
-        print("Assistant: Folder name contains invalid characters.")
-        return
+    # Validate each folder name while allowing nested paths
+    for part in Path(folder_name).parts:
+        if re.search(r'[<>:"|?*]', part):
+            print("Assistant: Folder name contains invalid characters.")
+            return
 
     docs_dir = Path(os.path.expanduser("~")) / "Documents"
     target_path = (docs_dir / folder_name).resolve()
@@ -720,8 +719,7 @@ def validate_action(action):
             return False
         return True
 
-    # Validate folder targets. Standard user folders are allowed, and custom
-    # folders are allowed only when they are descendants of Documents.
+    # Validate folder targets.
     if action_type in {"open_folder", "list_files", "count_files"}:
         allowed_folders = {
             "downloads",
@@ -729,22 +727,70 @@ def validate_action(action):
             "desktop",
             "pictures",
             "videos",
-            "music"
+            "music",
+        }
+
+        blocked_folders = {
+            "system32",
+            "program files",
+            "appdata",
         }
 
         target_clean = str(target).strip().lower().replace("\\", "/")
-
-        if target_clean in allowed_folders:
-            return True
-
-        # Never allow absolute paths, drive-qualified paths, or traversal.
         target_path = Path(target_clean)
-        if (target_path.is_absolute() or
-                ":" in target_clean.split("/")[0] or
-                any(part == ".." for part in target_path.parts)):
+
+        # Block absolute paths, Windows drive paths, traversal,
+        # and explicitly blocked system folders.
+        if (
+            target_path.is_absolute()
+            or (
+                len(target_clean) >= 3
+                and target_clean[1] == ":"
+                and target_clean[2] == "/"
+            )
+            or target_clean.startswith("/")
+            or ".." in target_path.parts
+            or target_clean in blocked_folders
+        ):
             print(f"Assistant: Blocked unsafe folder path '{target}'.")
             return False
 
+        # Allow standard user folders.
+        if target_clean in allowed_folders:
+            return True
+
+        # Custom folders must exist inside Documents.
+        documents_path = Path(get_folders()["documents"]).resolve()
+        candidate = (documents_path / target_clean).resolve()
+
+        try:
+            candidate.relative_to(documents_path)
+        except ValueError:
+            print(f"Assistant: Blocked folder outside Documents '{target}'.")
+            return False
+
+        if candidate.is_dir():
+            return True
+
+        print(f"Assistant: Blocked unknown folder '{target}'.")
+        return False
+
+        # Allow the standard Windows user folders.
+        if target_clean in allowed_folders:
+            return True
+
+            # Never allow absolute paths, drive paths, or traversal.
+            target_path = Path(target_clean)
+
+            if (
+                target_path.is_absolute()
+                or ":" in target_clean.split("/")[0]
+                or ".." in target_path.parts
+            ):
+                print(f"Assistant: Blocked unsafe folder path '{target}'.")
+                return False
+
+        # Custom folders must exist inside Documents.
         documents_path = Path(get_folders()["documents"]).resolve()
         candidate = (documents_path / target_clean).resolve()
 
@@ -1748,6 +1794,38 @@ def process_command(command):
 
     # Detect negation words (e.g. "don't open chrome")
     negation_detected = bool(re.search(r"\b(?:don't|do not|never|stop|avoid|not)\b", command_lower))
+
+    # RELIABLE OPEN-FOLDER PATH COMMANDS
+    # Handle explicit filesystem paths deterministically instead of relying
+    # on the small local model to infer the requested folder.
+    # Examples:
+    #   Open JARVIS_Test_Final/SubTest folder
+    #   Open Documents/JARVIS_Test_Final/SubTest
+    open_folder_match = re.search(
+        r'^\s*(?:open|launch|start)\s+(?:the\s+)?(.+?)'
+        r'(?:\s+folder)?\s*$',
+        command,
+        re.IGNORECASE
+    )
+
+    if open_folder_match and not negation_detected:
+        requested_folder = open_folder_match.group(1).strip().strip("\"'")
+        requested_folder = re.sub(
+            r'^Documents[\\\\/]',
+            '',
+            requested_folder,
+            flags=re.IGNORECASE
+        ).strip().rstrip("\\\\")
+
+        # Path-style folder requests are handled directly.
+        if '/' in requested_folder or '\\\\' in requested_folder:
+            print(
+                f"Assistant: Direct open-folder request -> {requested_folder}"
+            )
+            return execute_action({
+                "action": "open_folder",
+                "target": requested_folder
+            })
 
     # Words that strongly indicate opening an application/folder.
     open_words = {
