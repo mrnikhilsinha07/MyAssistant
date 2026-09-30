@@ -195,7 +195,7 @@ const glow=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTextur
 glow.scale.set(7.2,7.2,1);
 core.add(glow);
 
-let working=false,dragging=false,px=0,py=0;
+let working=false,coreState="idle",dragging=false,px=0,py=0;
 let targetX=-.05,targetY=.15,currentX=targetX,currentY=targetY;
 
 renderer.domElement.addEventListener("pointerdown",e=>{
@@ -212,11 +212,25 @@ renderer.domElement.addEventListener("pointermove",e=>{
 });
 renderer.domElement.addEventListener("pointerup",()=>{dragging=false;renderer.domElement.classList.remove("dragging")});
 
+function setCoreState(next){
+  coreState=next;
+  working=next!=="idle";
+
+  const states={
+    idle:{status:"● ONLINE",statusColor:"#67efff",label:"STANDBY",logPrefix:"SYSTEM READY"},
+    thinking:{status:"● THINKING",statusColor:"#ffc83d",label:"THINKING",logPrefix:"AI THINKING"},
+    executing:{status:"● EXECUTING",statusColor:"#ff9f43",label:"EXECUTING",logPrefix:"COMMAND EXECUTING"},
+    complete:{status:"● COMPLETE",statusColor:"#8dffb3",label:"COMPLETE",logPrefix:"COMMAND COMPLETE"}
+  };
+
+  const current=states[next]||states.idle;
+  state.textContent=current.status;
+  state.style.color=current.statusColor;
+  label.textContent=current.label;
+}
+
 function setWorking(v){
-  working=v;
-  state.textContent=v?"● PROCESSING":"● ONLINE";
-  state.style.color=v?"#ffc83d":"#67efff";
-  label.textContent=v?"PROCESSING":"STANDBY";
+  setCoreState(v?"thinking":"idle");
 }
 
 function resize(){
@@ -238,15 +252,23 @@ async function sendCommand(){
     if(window.pywebview) await window.pywebview.api.close_app();
     return;
   }
-  setWorking(true);
+  setCoreState("thinking");
   send.disabled=true;
   try{
+    // Give the renderer a frame to show the THINKING state before the
+    // Python bridge begins the synchronous assistant operation.
+    await new Promise(requestAnimationFrame);
+    setCoreState("executing");
     const result=await window.pywebview.api.run_command(command);
     log.textContent=(result||"Command completed.").replace(/\n/g," ");
+    setCoreState("complete");
+    await new Promise(resolve=>setTimeout(resolve,700));
   }catch(e){
     log.textContent="Assistant error: "+e;
+    setCoreState("complete");
+    await new Promise(resolve=>setTimeout(resolve,700));
   }
-  setWorking(false);
+  setCoreState("idle");
   send.disabled=false;
   input.focus();
 }
@@ -259,49 +281,50 @@ function animate(){
   requestAnimationFrame(animate);
   const dt=Math.min(clock.getDelta(),.05);
   elapsed+=dt;
-  const speed=working?1.8:.55;
+  const intensity=coreState==="idle"?0:coreState==="thinking"?.65:coreState==="executing"?1:0.35;
+  const speed=.55+1.25*intensity;
 
   if(!dragging){
-    targetY+=dt*(working?.38:.11);
-    targetX+=Math.sin(elapsed*(working?1.7:.55))*dt*(working?.12:.025);
+    targetY+=dt*((.11+.27*intensity));
+    targetX+=Math.sin(elapsed*((0.55+1.15*intensity)))*dt*((.025+.095*intensity));
   }
   currentX+=(targetX-currentX)*.055;
   currentY+=(targetY-currentY)*.055;
   root.rotation.x=currentX;
   root.rotation.y=currentY;
 
-  const pulse=1+Math.sin(elapsed*(working?5.5:1.5))*(working?.035:.012);
+  const pulse=1+Math.sin(elapsed*((1.5+4*intensity)))*((.012+.023*intensity));
   root.scale.setScalar(pulse);
 
-  honey.rotation.x+=dt*(working?.22:.07);
-  honey.rotation.y+=dt*(working?.34:.10);
-  inner.rotation.x-=dt*(working?.15:.05);
-  inner.rotation.y+=dt*(working?.26:.08);
-  shellA.rotation.x+=dt*(working?.18:.045);
-  shellA.rotation.y-=dt*(working?.22:.055);
-  shellB.rotation.z+=dt*(working?.15:.035);
-  shellB.rotation.y+=dt*(working?.11:.03);
-  shellC.rotation.x-=dt*(working?.10:.025);
-  shellC.rotation.z+=dt*(working?.13:.03);
-  dots.rotation.y+=dt*(working?.18:.04);
-  dots.rotation.x+=dt*(working?.07:.015);
-  arcGroup.rotation.y-=dt*(working?.22:.045);
-  arcGroup.rotation.z+=dt*(working?.13:.025);
+  honey.rotation.x+=dt*((.07+.15*intensity));
+  honey.rotation.y+=dt*((.10+.24*intensity));
+  inner.rotation.x-=dt*((.05+.10*intensity));
+  inner.rotation.y+=dt*((.08+.18*intensity));
+  shellA.rotation.x+=dt*((.045+.135*intensity));
+  shellA.rotation.y-=dt*((.055+.165*intensity));
+  shellB.rotation.z+=dt*((.035+.115*intensity));
+  shellB.rotation.y+=dt*((.03+.08*intensity));
+  shellC.rotation.x-=dt*((.025+.075*intensity));
+  shellC.rotation.z+=dt*((.03+.10*intensity));
+  dots.rotation.y+=dt*((.04+.14*intensity));
+  dots.rotation.x+=dt*((.015+.055*intensity));
+  arcGroup.rotation.y-=dt*((.045+.175*intensity));
+  arcGroup.rotation.z+=dt*((.025+.105*intensity));
 
-  dots.material.size=.012*(working?1.35:1);
-  dots.material.opacity=working?.95:.78;
+  dots.material.size=.012*((1+0.35*intensity));
+  dots.material.opacity=(.78+.17*intensity);
   for(const o of orbits){
-    o.line.rotation.y+=dt*(working?.24:.055);
-    o.line.rotation.x+=dt*(working?.11:.025);
-    o.phase+=dt*o.speed*(working?3:1);
+    o.line.rotation.y+=dt*((.055+.185*intensity));
+    o.line.rotation.x+=dt*((.025+.085*intensity));
+    o.phase+=dt*o.speed*((1+2*intensity));
     const t=(o.phase%(Math.PI*2))/(Math.PI*2);
     const pos=o.curve.getPointAt(t);
     o.marker.position.copy(pos);
     o.marker.position.applyEuler(o.line.rotation);
-    o.marker.scale.setScalar(working?1.3:1);
+    o.marker.scale.setScalar((1+0.3*intensity));
   }
-  glow.scale.setScalar(7.2*(working?1.16+Math.sin(elapsed*5)*.05:1));
-  violet.intensity=working?10:7;
+  glow.scale.setScalar(7.2*((1+0.16*intensity+Math.sin(elapsed*(2+3*intensity))*.05*intensity)));
+  violet.intensity=(7+3*intensity);
 
   renderer.render(scene,camera);
 }
