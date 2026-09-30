@@ -802,7 +802,7 @@ def validate_action(action):
     return True
 
 
-def execute_action(action):
+def _execute_action(action):
     if not validate_action(action):
         return None
 
@@ -989,6 +989,29 @@ def execute_action(action):
     status = "SUCCESS" if res and not str(res).startswith("Failed") and not str(res).startswith("Invalid") else "FAILED"
     memory_manager.log_action(action_type, target, status, str(res))
     return res
+def execute_action(action):
+    """Safely execute an AI-generated action."""
+    try:
+        return _execute_action(action)
+    except Exception as e:
+        action_type = action.get("action", "unknown") if isinstance(action, dict) else "unknown"
+        target = action.get("target", "") if isinstance(action, dict) else ""
+
+        error_message = f"Failed to execute action '{action_type}': {e}"
+
+        print(f"Assistant: {error_message}")
+
+        try:
+            memory_manager.log_action(
+                action_type,
+                target,
+                "FAILED",
+                error_message
+            )
+        except Exception:
+            pass
+
+        return error_message
 
 def save_personal_memory(key, value):
     norm_key = memory_manager.normalize_key(key)
