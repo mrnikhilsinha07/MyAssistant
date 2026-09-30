@@ -775,37 +775,6 @@ def validate_action(action):
         print(f"Assistant: Blocked unknown folder '{target}'.")
         return False
 
-        # Allow the standard Windows user folders.
-        if target_clean in allowed_folders:
-            return True
-
-            # Never allow absolute paths, drive paths, or traversal.
-            target_path = Path(target_clean)
-
-            if (
-                target_path.is_absolute()
-                or ":" in target_clean.split("/")[0]
-                or ".." in target_path.parts
-            ):
-                print(f"Assistant: Blocked unsafe folder path '{target}'.")
-                return False
-
-        # Custom folders must exist inside Documents.
-        documents_path = Path(get_folders()["documents"]).resolve()
-        candidate = (documents_path / target_clean).resolve()
-
-        try:
-            candidate.relative_to(documents_path)
-        except ValueError:
-            print(f"Assistant: Blocked folder outside Documents '{target}'.")
-            return False
-
-        if candidate.is_dir():
-            return True
-
-        print(f"Assistant: Blocked unknown folder '{target}'.")
-        return False
-
     # Validate file-read targets. Reads are restricted to existing files inside Documents.
     if action_type == "read_file":
         file_target = str(target).strip().replace("\\", "/")
