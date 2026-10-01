@@ -11,6 +11,7 @@ import pyautogui
 import memory_manager
 from ddgs import DDGS
 import ctypes
+import speech_recognition as sr
 
 
 
@@ -2017,6 +2018,44 @@ Always choose the action based on the user's INTENT.
     except Exception as error:
         print("Assistant: I could not contact my local AI.")
         print(f"System error: {error}")
+
+def listen_for_voice():
+    """Listen through the default microphone and convert speech to text."""
+    recognizer = sr.Recognizer()
+
+    try:
+        with sr.Microphone() as source:
+            print("Assistant: Listening...")
+            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            audio = recognizer.listen(
+                source,
+                timeout=5,
+                phrase_time_limit=8
+            )
+
+        print("Assistant: Processing voice...")
+
+        try:
+            text = recognizer.recognize_google(audio)
+            print(f"You (voice): {text}")
+            return text.strip()
+
+        except sr.UnknownValueError:
+            print("Assistant: I couldn't understand what you said.")
+            return ""
+
+        except sr.RequestError as error:
+            print(f"Assistant: Speech recognition service unavailable: {error}")
+            return ""
+
+    except sr.WaitTimeoutError:
+        print("Assistant: I didn't hear anything.")
+        return ""
+
+    except Exception as error:
+        print(f"Assistant: Microphone error: {error}")
+        return ""
+
 def process_command(command):
     command = command.strip()
     
