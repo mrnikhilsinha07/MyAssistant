@@ -1,5 +1,6 @@
 import os
 import subprocess
+import shutil
 import json
 import time
 import re
@@ -10,6 +11,7 @@ import pyautogui
 import memory_manager
 from ddgs import DDGS
 import ctypes
+
 
 
 def web_search(query, num_results=5):
@@ -107,15 +109,6 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     conversation_history = []
 
-# Allowed applications
-APPS = {
-    "chrome": ["cmd", "/c", "start", "", "chrome"],
-    "notepad": ["notepad.exe"],
-    "calculator": ["calc.exe"],
-    "calculator app": ["calc.exe"],
-    "file explorer": ["explorer.exe"],
-    "explorer": ["explorer.exe"],
-}
 # Allowed applications for closing
 CLOSE_APPS = {
     "chrome": "chrome.exe",
@@ -195,26 +188,131 @@ def move_mouse(x, y):
         print(f"Assistant: Could not move mouse: {e}")
         return False
     
+APP_ID_CACHE = {}
+
+# Deterministic Windows applications. These are resolved directly instead of
+# using a generic Start Menu search, which can return the wrong AppID.
+COMMON_APP_EXECUTABLES = {
+    "calculator": "calc.exe",
+    "calc": "calc.exe",
+    "notepad": "notepad.exe",
+    "file explorer": "explorer.exe",
+    "explorer": "explorer.exe",
+}
+
+
+BLOCKED_APP_NAMES = {
+    "cmd", "cmd.exe", "command prompt",
+    "powershell", "powershell.exe", "windows powershell",
+    "pwsh", "pwsh.exe", "regedit", "regedit.exe", "registry editor",
+    "diskpart", "diskpart.exe", "format", "format.com",
+    "taskkill", "taskkill.exe", "mshta", "mshta.exe",
+    "wscript", "wscript.exe", "cscript", "cscript.exe",
+    "python", "python.exe", "python3", "python3.exe",
+    "bash", "bash.exe", "wsl", "wsl.exe", "zsh", "zsh.exe",
+    "curl", "curl.exe", "wget", "wget.exe",
+}
+
+
+def _normalize_app_name(app_name):
+    return re.sub(r"\s+", " ", str(app_name).strip()).lower()
+
+
+def find_start_menu_app(app_name):
+    """Return the first matching Windows Start Menu AppID, or None."""
+    normalized = _normalize_app_name(app_name)
+    if not normalized or normalized in BLOCKED_APP_NAMES:
+        return None
+
+    script = (
+        "$name=$args[0]; "
+        "Get-StartApps | "
+        "Where-Object { $_.Name -like ('*' + $name + '*') } | "
+        "Select-Object -First 1 -ExpandProperty AppID"
+    )
+
+    if normalized in APP_ID_CACHE:
+        return APP_ID_CACHE[normalized]
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                script, normalized,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        app_id = result.stdout.strip()
+        if app_id:
+            APP_ID_CACHE[normalized] = app_id
+        return app_id or None
+    except Exception:
+        return None
+
+
+def is_installed_app(app_name):
+    """Check whether an application can be safely resolved before launching it."""
+    normalized = _normalize_app_name(app_name)
+    if not normalized or normalized in BLOCKED_APP_NAMES:
+        return False
+
+    # Deterministic Windows apps are checked directly.
+    if normalized in COMMON_APP_EXECUTABLES:
+        return bool(shutil.which(COMMON_APP_EXECUTABLES[normalized]))
+
+    if find_start_menu_app(normalized):
+        return True
+    return bool(shutil.which(normalized))
+
 def open_application(app_name):
-    """
-    Dynamically find and open Windows applications.
-    No application needs to be manually added to APPS.
-    """
-    app_name = app_name.strip()
+    """Find and launch an installed Windows application dynamically."""
+
+    app_name = str(app_name).strip()
 
     if not app_name:
         print("Assistant: Please specify an application.")
         return False
 
-    try:
-        # 1. Try Windows Start Menu applications automatically
-        safe_name = app_name.replace("'", "''")
+    def normalize(value):
+        value = str(value).lower().strip()
 
-        powershell_command = (
-            f"(Get-StartApps | "
-            f"Where-Object {{ $_.Name -like '*{safe_name}*' }} | "
-            f"Select-Object -First 1 -ExpandProperty AppID)"
-        )
+        for suffix in (
+            ".exe",
+            ".lnk",
+            "application",
+            "app",
+            "program",
+            "ide",
+            "player",
+            "browser",
+            "launcher",
+            "client",
+        ):
+            if value.endswith(suffix):
+                value = value[:-len(suffix)]
+
+        value = value.replace("_", " ")
+        value = value.replace("-", " ")
+
+        return " ".join(value.split())
+
+    requested = normalize(app_name)
+
+    if requested in BLOCKED_APP_NAMES:
+        print(f"Assistant: I cannot launch the system command '{app_name}'.")
+        return False
+
+    # ============================================================
+    # 1. WINDOWS START MENU APPLICATION DISCOVERY
+    # ============================================================
+
+    try:
+        powershell_script = r"""
+$apps = Get-StartApps | Select-Object Name, AppID
+$apps | ConvertTo-Json -Compress
+"""
 
         result = subprocess.run(
             [
@@ -223,64 +321,288 @@ def open_application(app_name):
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                powershell_command
+                powershell_script,
             ],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
         )
 
-        app_id = result.stdout.strip()
+        if result.returncode == 0 and result.stdout.strip():
+            data = json.loads(result.stdout)
 
-        if app_id:
-            subprocess.Popen(
-                [
-                    "explorer.exe",
-                    f"shell:AppsFolder\\{app_id}"
-                ]
-            )
+            if isinstance(data, dict):
+                data = [data]
 
-            print(f"Assistant: Opening {app_name}.")
-            return True
+            exact_match = None
+            partial_match = None
 
-        # 2. If not found in Start Menu, try Windows PATH
+            for item in data:
+                name = str(item.get("Name", "")).strip()
+                app_id = str(item.get("AppID", "")).strip()
+
+                if not name or not app_id:
+                    continue
+
+                normalized_name = normalize(name)
+
+                # Exact match first.
+                if normalized_name == requested:
+                    exact_match = (name, app_id)
+                    break
+
+                # Partial match only as fallback.
+                if (
+                    requested in normalized_name
+                    or normalized_name in requested
+                ):
+                    if partial_match is None:
+                        partial_match = (name, app_id)
+
+            match = exact_match or partial_match
+
+            if match:
+                display_name, app_id = match
+
+                try:
+                    subprocess.Popen(
+                        [
+                            "explorer.exe",
+                            f"shell:AppsFolder\\{app_id}",
+                        ],
+                        shell=False,
+                    )
+
+                    print(f"Assistant: Opening {display_name}.")
+                    return True
+
+                except Exception:
+                    pass
+
+    except Exception:
+        pass
+
+    # ============================================================
+    # 2. WINDOWS START MENU SHORTCUT DISCOVERY
+    # ============================================================
+
+    try:
+        start_menu_paths = [
+            Path(os.environ.get("APPDATA", ""))
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs",
+
+            Path(os.environ.get("PROGRAMDATA", ""))
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs",
+        ]
+
+        candidates = []
+
+        for start_root in start_menu_paths:
+            if not start_root.is_dir():
+                continue
+
+            try:
+                for shortcut in start_root.rglob("*.lnk"):
+                    shortcut_name = normalize(shortcut.stem)
+
+                    if shortcut_name == requested:
+                        candidates.insert(0, shortcut)
+
+                    elif (
+                        requested in shortcut_name
+                        or shortcut_name in requested
+                    ):
+                        candidates.append(shortcut)
+
+            except Exception:
+                continue
+
+        for shortcut in candidates:
+            try:
+                os.startfile(str(shortcut))
+                print(f"Assistant: Opening {shortcut.stem}.")
+                return True
+            except Exception:
+                continue
+
+    except Exception:
+        pass
+
+    # ============================================================
+    # 3. WINDOWS APP PATHS REGISTRY
+    # ============================================================
+
+    try:
+        import winreg
+
+        registry_locations = [
+            (
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\App Paths",
+            ),
+            (
+                winreg.HKEY_LOCAL_MACHINE,
+                r"Software\Microsoft\Windows\CurrentVersion\App Paths",
+            ),
+            (
+                winreg.HKEY_LOCAL_MACHINE,
+                r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths",
+            ),
+        ]
+
+        for hive, registry_path in registry_locations:
+            try:
+                with winreg.OpenKey(hive, registry_path) as root_key:
+                    index = 0
+
+                    while True:
+                        try:
+                            subkey_name = winreg.EnumKey(root_key, index)
+                            index += 1
+                        except OSError:
+                            break
+
+                        normalized_key = normalize(
+                            Path(subkey_name).stem
+                        )
+
+                        if (
+                            normalized_key == requested
+                            or requested in normalized_key
+                            or normalized_key in requested
+                        ):
+                            try:
+                                with winreg.OpenKey(
+                                    root_key,
+                                    subkey_name,
+                                ) as app_key:
+
+                                    executable, _ = winreg.QueryValueEx(
+                                        app_key,
+                                        None,
+                                    )
+
+                                    executable = str(executable).strip(
+                                        '" '
+                                    )
+
+                                    executable_path = Path(executable)
+
+                                    if executable_path.is_file():
+                                        subprocess.Popen(
+                                            [str(executable_path)],
+                                            shell=False,
+                                        )
+
+                                        print(
+                                            f"Assistant: Opening {app_name}."
+                                        )
+                                        return True
+
+                            except Exception:
+                                continue
+
+            except Exception:
+                continue
+
+    except Exception:
+        pass
+
+    # ============================================================
+    # 4. SEARCH COMMON WINDOWS APPLICATION LOCATIONS
+    # ============================================================
+
+    search_roots = [
+        Path(os.environ.get("LOCALAPPDATA", "")),
+        Path(os.environ.get("PROGRAMFILES", "")),
+        Path(os.environ.get("PROGRAMFILES(X86)", "")),
+    ]
+
+    possible_executables = []
+
+    for root in search_roots:
+        if not root.is_dir():
+            continue
+
         try:
-            subprocess.Popen(
-                app_name,
-                shell=True
-            )
+            # Search only a limited depth first.
+            for path in root.glob("*"):
+                if not path.is_dir():
+                    continue
 
-            time.sleep(0.5)
+                folder_name = normalize(path.name)
 
-            print(f"Assistant: Opening {app_name}.")
-            return True
+                if (
+                    requested == folder_name
+                    or requested in folder_name
+                    or folder_name in requested
+                ):
+                    possible_executables.extend(
+                        path.rglob("*.exe")
+                    )
 
         except Exception:
-            pass
+            continue
 
-        # 3. Try Windows Run command
+    # Prefer executable names that closely match the requested app.
+    possible_executables.sort(
+        key=lambda p: (
+            0 if normalize(p.stem) == requested else
+            1 if requested in normalize(p.stem) else
+            2
+        )
+    )
+
+    for executable in possible_executables:
         try:
-            subprocess.Popen(
-                ["cmd", "/c", "start", "", app_name],
-                shell=False
-            )
+            if executable.is_file():
+                subprocess.Popen(
+                    [str(executable)],
+                    shell=False,
+                )
 
-            time.sleep(0.5)
+                print(f"Assistant: Opening {app_name}.")
+                return True
+
+        except Exception:
+            continue
+
+    # ============================================================
+    # 5. SEARCH WINDOWS PATH
+    # ============================================================
+
+    try:
+        executable = shutil.which(app_name)
+
+        if executable:
+            subprocess.Popen(
+                [executable],
+                shell=False,
+            )
 
             print(f"Assistant: Opening {app_name}.")
             return True
 
-        except Exception:
-            pass
+    except Exception:
+        pass
 
-        print(f"Assistant: I could not find '{app_name}' on this PC.")
-        return False
+    # ============================================================
+    # APPLICATION NOT FOUND
+    # ============================================================
 
-    except Exception as error:
-        print(f"Assistant: Could not open {app_name}.")
-        print(f"System error: {error}")
-        return False
-    
+    print(
+        f"Assistant: I could not find an installed application "
+        f"matching '{app_name}'."
+    )
+
+    return False
+
 def close_application(app_name):
     app_name = app_name.strip().lower()
 
@@ -483,41 +805,39 @@ def list_running_applications():
 
 
 def create_folder(folder_name):
-    folder_name = folder_name.strip()
+    folder_name = str(folder_name).strip()
 
     if not folder_name:
         print("Assistant: Please provide a folder name.")
-        return
+        return False
 
-    # Validate each folder name while allowing nested paths
     for part in Path(folder_name).parts:
         if re.search(r'[<>:"|?*]', part):
             print("Assistant: Folder name contains invalid characters.")
-            return
+            return False
 
     docs_dir = Path(os.path.expanduser("~")) / "Documents"
     target_path = (docs_dir / folder_name).resolve()
 
-    # Ensure target_path stays strictly inside Documents (prevent path traversal)
     try:
         target_path.relative_to(docs_dir.resolve())
     except ValueError:
         print("Assistant: Blocked folder creation outside your Documents folder.")
-        return
+        return False
 
     if target_path.exists():
         print("Assistant: That folder already exists.")
-        return
+        return False
 
     try:
         target_path.mkdir(parents=True, exist_ok=False)
-        print(
-            f"Assistant: Created '{folder_name}' "
-            "inside your Documents folder."
-        )
+        print(f"Assistant: Created '{folder_name}' inside your Documents folder.")
+        return True
     except Exception as error:
         print("Assistant: I could not create the folder.")
         print(f"System error: {error}")
+        return False
+
 
 def create_file(file_name):
     file_name = file_name.strip()
@@ -657,148 +977,191 @@ def validate_action(action):
         print("Assistant: Invalid action format.")
         return False
 
-    # Handle multi-action plans
     if "actions" in action:
         actions = action.get("actions")
-
         if not isinstance(actions, list) or not actions:
             print("Assistant: Invalid multi-task plan.")
             return False
-
         for step in actions:
             if not validate_action(step):
                 return False
-
         return True
 
     action_type = action.get("action", "")
     target = action.get("target", "")
 
     allowed_actions = {
-        "open_app",
-        "type_text",
-        "press_key",
-        "hotkey",
-        "move_mouse",
-        "close_app",
-        "open_folder",
-        "list_files",
-        "count_files",
-        "list_running_apps",
-        "create_folder",
-        "create_file",
-        "write_file",
-        "read_file",
-        "time",
-        "help",
-        "remember",
-        "recall",
-        "chat",
-        "web_search"
+        "open_app", "type_text", "press_key", "hotkey", "move_mouse",
+        "close_app", "open_folder", "list_files", "count_files",
+        "list_running_apps", "create_folder", "create_file", "write_file",
+        "read_file", "time", "help", "remember", "recall", "chat", "web_search"
     }
 
     if action_type not in allowed_actions:
         print(f"Assistant: Blocked unknown action '{action_type}'.")
         return False
 
-    # Application control is intentionally limited to applications that JARVIS
-    # explicitly supports. This prevents commands such as cmd.exe, powershell,
-    # regedit, format, curl, or python from being launched through AI output.
-    if action_type in {"open_app", "close_app"}:
-        allowed_apps = {
-            "chrome",
-            "notepad",
-            "calculator",
-            "calculator app",
-            "explorer",
-            "file explorer",
-        }
-        target_clean = str(target).strip().lower()
-        if target_clean not in allowed_apps:
-            print(f"Assistant: Blocked unsupported application '{target}'.")
+    # Opening an application is allowed when Windows can resolve it as an
+    # installed Start Menu app or a real executable on PATH. High-risk command
+    # and system-management tools are blocked by BLOCKED_APP_NAMES.
+    if action_type == "open_app":
+        target_clean = _normalize_app_name(target)
+        if not target_clean:
+            print("Assistant: No application was specified.")
+            return False
+        if not is_installed_app(target_clean):
+            print(f"Assistant: Blocked unknown or unavailable application '{target}'.")
             return False
         return True
 
-    # Validate folder targets.
+    # Closing apps stays restricted because force-terminating arbitrary
+    # processes is materially more dangerous than launching an app.
+    if action_type == "close_app":
+        target_clean = _normalize_app_name(target)
+        if target_clean not in set(CLOSE_APPS.keys()):
+            print(f"Assistant: I am not allowed to close '{target}'.")
+            return False
+        return True
+
+    # Approved folders are the user's normal folders and their existing
+    # subfolders. Absolute paths and traversal are always blocked.
     if action_type in {"open_folder", "list_files", "count_files"}:
-        allowed_folders = {
-            "downloads",
-            "documents",
-            "desktop",
-            "pictures",
-            "videos",
-            "music",
-        }
+        target_clean = str(target).strip().strip('"\'').replace("\\", "/")
+        if not target_clean:
+            print("Assistant: No folder was specified.")
+            return False
 
-        blocked_folders = {
-            "system32",
-            "program files",
-            "appdata",
-        }
-
-        target_clean = str(target).strip().lower().replace("\\", "/")
         target_path = Path(target_clean)
-
-        # Block absolute paths, Windows drive paths, traversal,
-        # and explicitly blocked system folders.
+        blocked_parts = {"system32", "program files", "appdata", "windows", "programdata"}
         if (
             target_path.is_absolute()
-            or (
-                len(target_clean) >= 3
-                and target_clean[1] == ":"
-                and target_clean[2] == "/"
-            )
+            or (len(target_clean) >= 3 and target_clean[1] == ":" and target_clean[2] == "/")
             or target_clean.startswith("/")
             or ".." in target_path.parts
-            or target_clean in blocked_folders
+            or any(part.lower() in blocked_parts for part in target_path.parts)
         ):
             print(f"Assistant: Blocked unsafe folder path '{target}'.")
             return False
 
-        # Allow standard user folders.
-        if target_clean in allowed_folders:
-            return True
-
-        # Custom folders must exist inside Documents.
-        documents_path = Path(get_folders()["documents"]).resolve()
-        candidate = (documents_path / target_clean).resolve()
-
-        try:
-            candidate.relative_to(documents_path)
-        except ValueError:
-            print(f"Assistant: Blocked folder outside Documents '{target}'.")
+        folders = get_folders()
+        normalized = target_clean.lower()
+        if normalized in folders:
+            if os.path.isdir(folders[normalized]):
+                return True
+            print(f"Assistant: Folder '{target}' does not exist.")
             return False
 
-        if candidate.is_dir():
-            return True
+        resolved = resolve_folder_path(target_clean)
+        if resolved is None or not os.path.isdir(resolved):
+            print(f"Assistant: Blocked unknown folder '{target}'.")
+            return False
 
-        print(f"Assistant: Blocked unknown folder '{target}'.")
+        resolved_abs = os.path.abspath(resolved)
+        for base_path in folders.values():
+            base_abs = os.path.abspath(base_path)
+            try:
+                if os.path.commonpath([resolved_abs, base_abs]) == base_abs:
+                    return True
+            except ValueError:
+                continue
+
+        print(f"Assistant: Blocked folder outside approved user folders '{target}'.")
         return False
 
-    # Validate file-read targets. Reads are restricted to existing files inside Documents.
+    # Create/write operations are restricted to Documents and get a common
+    # traversal/name/content-size check before their individual functions run.
+    if action_type in {"create_file", "write_file"}:
+        file_target = str(target).strip().strip('"\'').replace("\\", "/")
+        if file_target.lower().startswith("documents/"):
+            file_target = file_target[len("documents/"):]
+        if not file_target or ".." in Path(file_target).parts:
+            print(f"Assistant: Blocked unsafe file path '{target}'.")
+            return False
+
+        documents_path = Path(get_folders()["documents"]).resolve()
+        file_path = (documents_path / file_target).resolve()
+        try:
+            file_path.relative_to(documents_path)
+        except ValueError:
+            print(f"Assistant: Blocked file path outside Documents '{target}'.")
+            return False
+
+        for part in Path(file_target).parts:
+            if re.search(r'[<>:"|?*]', part):
+                print(f"Assistant: Blocked invalid file name '{target}'.")
+                return False
+
+        if action_type == "write_file":
+            value = action.get("value", "")
+            if not isinstance(value, str) or len(value) > 1_000_000:
+                print("Assistant: Blocked invalid or oversized file content.")
+                return False
+        return True
+
+    # Reads are restricted to existing files inside Documents.
     if action_type == "read_file":
         file_target = str(target).strip().replace("\\", "/")
         if not file_target:
             print("Assistant: No file was specified.")
             return False
-
         if file_target.lower().startswith("documents/"):
             file_target = file_target[len("documents/"):]
 
         documents_path = Path(get_folders()["documents"]).resolve()
         file_path = (documents_path / file_target).resolve()
-
         try:
             file_path.relative_to(documents_path)
         except ValueError:
             print(f"Assistant: Blocked file read outside Documents '{target}'.")
             return False
-
         if not file_path.is_file():
             print(f"Assistant: Blocked unknown file '{target}'.")
             return False
+        return True
 
-    # All other allowed actions are valid.
+    if action_type == "type_text":
+        if not isinstance(target, str) or len(target) > 5_000:
+            print("Assistant: Blocked invalid or oversized text input.")
+            return False
+        return True
+
+    valid_keys = {
+        "\"", "'", "\\", *"abcdefghijklmnopqrstuvwxyz0123456789",
+        "enter", "esc", "escape", "tab", "space", "backspace", "delete",
+        "home", "end", "pageup", "pagedown", "up", "down", "left", "right",
+        "shift", "ctrl", "alt", "win", "command", "insert", "capslock",
+        "numlock", "scrolllock", "pause", "printscreen",
+        *[f"f{i}" for i in range(1, 13)],
+        "decimal", "add", "subtract", "multiply", "divide", "separator",
+    }
+
+    if action_type == "press_key":
+        key = str(target).strip().lower()
+        if key not in valid_keys:
+            print(f"Assistant: Blocked unsupported key '{target}'.")
+            return False
+        return True
+
+    if action_type == "hotkey":
+        keys = [key.strip().lower() for key in str(target).split("+") if key.strip()]
+        if not keys or len(keys) > 4 or any(key not in valid_keys for key in keys):
+            print(f"Assistant: Blocked unsupported hotkey '{target}'.")
+            return False
+        return True
+
+    if action_type == "move_mouse":
+        target_clean = str(target).strip().lower()
+        if target_clean in {"center", "top-left", "top-right", "bottom-left", "bottom-right"}:
+            return True
+        try:
+            x_text, y_text = target_clean.split(",", 1)
+            int(x_text.strip())
+            int(y_text.strip())
+        except (ValueError, TypeError):
+            print(f"Assistant: Blocked invalid mouse position '{target}'.")
+            return False
+        return True
+
     return True
 
 
@@ -918,8 +1281,8 @@ def _execute_action(action):
 
     elif action_type == "create_folder":
         folder_name = target.replace("Documents/", "", 1).replace("Documents\\", "", 1)
-        create_folder(folder_name)
-        res = f"Created folder {target}"
+        success = create_folder(folder_name)
+        res = f"Created folder {target}" if success else f"Failed to create folder {target}"
 
     elif action_type == "create_file":
         success = create_file(target)
@@ -1111,6 +1474,19 @@ IMPORTANT:
 - If the user asks to move the mouse but gives no position, use the "chat" action and ask for the position.
 - Do not choose "open_app" for a mouse movement request.
 - Do not infer a mouse position from an application name.
+
+TYPE TEXT
+Use when the user explicitly asks the assistant to type text into the currently focused application.
+JSON:
+{"action":"type_text","target":"text to type"}
+
+PRESS KEY / HOTKEY
+Use when the user explicitly asks to press a keyboard key or key combination.
+Examples:
+{"action":"press_key","target":"enter"}
+{"action":"hotkey","target":"ctrl+c"}
+Do not invent keys or key combinations.
+
 3. CLOSE APPLICATION
 Use when the user wants to close an allowed application.
 
@@ -2036,7 +2412,7 @@ def main():
         print("Local AI ready.")
     except Exception as error:
         print(f"Warning: Could not contact local AI ({error}).")
-        print("Please ensure the Ollama service is running and 'qwen3:4b' is installed.")
+        print("Please ensure the Ollama service is running and 'qwen3:1.7b' is installed.")
     print("========================================")
     print("        MY PERSONAL ASSISTANT")
     print("========================================")
