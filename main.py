@@ -1428,11 +1428,13 @@ Use when the user wants to launch an application.
 JSON:
 {"action":"open_app","target":"chrome"}
 
-Allowed applications:
-- chrome
-- notepad
-- calculator
-- explorer
+Application rules:
+- The user may request ANY application installed on the Windows computer.
+- Do not maintain or assume a fixed list of applications.
+- Return the application name requested by the user as the "target".
+- Preserve the user's intended application name.
+- Do not invent an application that the user did not request.
+- The Python application resolver will determine whether the application is installed and how to launch it.
 
 Examples:
 "open calculator"
@@ -1488,16 +1490,17 @@ Examples:
 Do not invent keys or key combinations.
 
 3. CLOSE APPLICATION
-Use when the user wants to close an allowed application.
+Use when the user wants to close an installed application.
 
 JSON:
 {"action":"close_app","target":"calculator"}
 
-Allowed applications:
-- chrome
-- notepad
-- calculator
-- explorer
+Application rules:
+- The user may request ANY installed application.
+- Do not maintain or assume a fixed list of applications.
+- Return the application name requested by the user as the "target".
+- Do not invent an application that the user did not request.
+- The Python application resolver will determine whether the application exists and can be controlled.
 
 Examples:
 "close calculator"
@@ -1752,7 +1755,9 @@ INTENT RULES:
 - Never execute anything outside the allowed actions.
 - Never perform destructive actions.
 - Never delete, modify, move, upload, download, install, or uninstall anything unless a future tool explicitly allows it.
-- Only use the allowed folders and applications listed above.
+- Applications are dynamic and are resolved by the Python application resolver.
+- For open_app and close_app, the target may be any application explicitly requested by the user.
+- Do not restrict applications to examples shown in this prompt.
 
 MOST IMPORTANT DISTINCTION:
 
