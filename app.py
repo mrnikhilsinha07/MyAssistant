@@ -33,6 +33,9 @@ body{font-family:Consolas,"Segoe UI",sans-serif;color:#dffcff}
 #command::placeholder{color:#38666b}
 #send{height:42px;margin-right:8px;padding:0 22px;border:0;background:#062a2f;color:#5feaf2;font:bold 11px Consolas;cursor:pointer}
 #send:hover{background:#0a4147}
+#voice{height:42px;margin-right:6px;padding:0 16px;border:1px solid #17474d;background:#041d21;color:#8df7ff;font:bold 11px Consolas;cursor:pointer}
+#voice:hover{background:#08343a}
+#voice:disabled{opacity:.45;cursor:default}
 #send:disabled{opacity:.45;cursor:default}
 #log{position:absolute;left:2px;top:62px;color:#3f8d94;font-size:8px;white-space:nowrap;max-width:80%;overflow:hidden;text-overflow:ellipsis}
 #core-label{position:absolute;z-index:10;left:50%;top:91%;transform:translate(-50%,-50%);text-align:center;color:#5d727c;font-size:10px;letter-spacing:2px;pointer-events:none}
@@ -49,6 +52,7 @@ body{font-family:Consolas,"Segoe UI",sans-serif;color:#dffcff}
   <div id="command-area">
     <div id="command-box">
       <input id="command" autocomplete="off" placeholder="Enter a command...">
+      <button id="voice" title="Voice command">🎙 VOICE</button>
       <button id="send">SEND</button>
     </div>
     <div id="log">SYSTEM READY</div>
@@ -61,6 +65,7 @@ import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.m
 const visual=document.getElementById("visual");
 const input=document.getElementById("command");
 const send=document.getElementById("send");
+const voice=document.getElementById("voice");
 const state=document.getElementById("state");
 const label=document.getElementById("core-label");
 const log=document.getElementById("log");
@@ -218,6 +223,7 @@ function setCoreState(next){
 
   const states={
     idle:{status:"● ONLINE",statusColor:"#67efff",label:"STANDBY",logPrefix:"SYSTEM READY"},
+    listening:{status:"● LISTENING",statusColor:"#67efff",label:"LISTENING",logPrefix:"LISTENING FOR VOICE"},
     thinking:{status:"● THINKING",statusColor:"#ffc83d",label:"THINKING",logPrefix:"AI THINKING"},
     executing:{status:"● EXECUTING",statusColor:"#ff9f43",label:"EXECUTING",logPrefix:"COMMAND EXECUTING"},
     complete:{status:"● COMPLETE",statusColor:"#8dffb3",label:"COMPLETE",logPrefix:"COMMAND COMPLETE"}
@@ -241,6 +247,56 @@ function resize(){
 }
 addEventListener("resize",resize);
 resize();
+
+async function listenVoice(){
+  if(working)return;
+
+  setCoreState("listening");
+  send.disabled=true;
+  voice.disabled=true;
+  input.value="";
+  log.textContent="LISTENING FOR VOICE...";
+
+  try{
+    await new Promise(requestAnimationFrame);
+    const text=await window.pywebview.api.listen_for_voice();
+
+    if(!text){
+      log.textContent="No voice command detected.";
+      setCoreState("idle");
+      return;
+    }
+    if(text.startsWith("__VOICE_ERROR__:")){
+      throw new Error(text.substring("__VOICE_ERROR__:".length));
+    }
+
+    input.value=text;
+    log.textContent="VOICE: "+text;
+
+    if(text.trim().toLowerCase()==="exit"){
+      if(window.pywebview) await window.pywebview.api.close_app();
+      return;
+    }
+
+    setCoreState("thinking");
+    await new Promise(requestAnimationFrame);
+    setCoreState("executing");
+
+    const result=await window.pywebview.api.run_command(text);
+    log.textContent=(result||"Command completed.").replace(/\n/g," ");
+    setCoreState("complete");
+    await new Promise(resolve=>setTimeout(resolve,700));
+  }catch(e){
+    log.textContent="Voice error: "+e;
+    setCoreState("complete");
+    await new Promise(resolve=>setTimeout(resolve,700));
+  }
+
+  setCoreState("idle");
+  send.disabled=false;
+  voice.disabled=false;
+  input.focus();
+}
 
 async function sendCommand(){
   if(working)return;
@@ -273,6 +329,7 @@ async function sendCommand(){
   input.focus();
 }
 send.onclick=sendCommand;
+voice.onclick=listenVoice;
 input.addEventListener("keydown",e=>{if(e.key==="Enter")sendCommand()});
 
 const clock=new THREE.Clock();
@@ -338,6 +395,15 @@ animate();
 class Bridge:
     def __init__(self):
         self._hwnd = None
+
+    def listen_for_voice(self):
+        try:
+            result = jarvis.listen_for_voice()
+            if result is None:
+                return ""
+            return str(result).strip()
+        except Exception as error:
+            return f"__VOICE_ERROR__:{error}"
 
     def run_command(self, command):
         buffer = io.StringIO()
