@@ -13,3 +13,17 @@ __pycache__/
 venv/
 .vscode/
 .idea/
+# Local backups
+*_backup.py
+app_before_transparent_final.py
+main_before_cleanup.py
+main_before_results.py
+main_before_tts.py
+main_current_backup.py
+main_pre_phase1.py
+
+# Local project archive
+MyAssistant_Exact_Cyber_Core.zip
+
+# Local runtime data
+jarvis_data/
