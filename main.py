@@ -1218,15 +1218,33 @@ def _execute_action(action):
     if not validate_action(action):
         return None
 
-    # Handle multiple actions in the exact order requested
+    # Handle multiple actions in the exact order requested.
+    # Stop the sequence if an action fails instead of blindly continuing.
     if "actions" in action and isinstance(action["actions"], list):
         results = []
 
         for step in action["actions"]:
-            if isinstance(step, dict):
-                result = execute_action(step)
-                if result is not None:
-                    results.append(str(result))
+            if not isinstance(step, dict):
+                continue
+
+            result = execute_action(step)
+
+            if result is None:
+                print("Assistant: An action could not be completed. Stopping the remaining actions.")
+                break
+
+            result_text = str(result)
+            results.append(result_text)
+
+            failed_markers = (
+                "Failed",
+                "Blocked",
+                "Invalid",
+            )
+
+            if result_text.startswith(failed_markers):
+                print("Assistant: The previous action failed. Stopping the remaining actions.")
+                break
 
         return results
 
