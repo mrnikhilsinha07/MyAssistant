@@ -407,20 +407,43 @@ class Bridge:
 
     def run_command(self, command):
         buffer = io.StringIO()
+
         try:
             with contextlib.redirect_stdout(buffer):
                 result = jarvis.process_command(command)
 
             output = buffer.getvalue().strip()
+
             if not output:
                 if result == "exit":
                     output = "Assistant: Shutting down."
                 else:
                     output = "Assistant: Command completed."
-            return output
-        except Exception as error:
-            return f"Assistant error: {error}"
 
+           # Extract only the human-facing assistant response for TTS.
+            speech_text = ""
+
+            assistant_lines = []
+
+            for line in output.splitlines():
+                line = line.strip()
+
+                if line.lower().startswith("assistant:"):
+                    assistant_lines.append(
+                        line[len("assistant:"):].strip()
+                    )
+
+            if assistant_lines:
+                speech_text = " ".join(assistant_lines)
+
+            if speech_text:
+                jarvis.speak_text_async(speech_text)
+            return output
+
+        except Exception as error:
+            error_message = f"Assistant error: {error}"
+            jarvis.speak_text_async("Sorry, an error occurred.")
+            return error_message
     def close_app(self):
         # pywebview JS API methods execute on worker threads. Do not call
         # window.destroy() directly here because WebView2 native objects

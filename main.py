@@ -3,7 +3,9 @@ import subprocess
 import shutil
 import json
 import time
+import threading
 import re
+import pyttsx3
 from datetime import datetime
 from pathlib import Path
 import ollama
@@ -14,6 +16,52 @@ import ctypes
 import speech_recognition as sr
 
 
+# Text-to-speech engine
+import subprocess
+
+
+def speak_text(text):
+    """Speak assistant responses using Windows' native speech engine."""
+    if not text:
+        return
+
+    try:
+        safe_text = str(text).replace("'", "''")
+
+        command = (
+            "Add-Type -AssemblyName System.Speech; "
+            "$speaker = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            f"$speaker.Speak('{safe_text}'); "
+            "$speaker.Dispose()"
+        )
+
+        subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command
+            ],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            check=False
+        )
+
+    except Exception as error:
+        print(f"TTS error: {error}")
+
+
+def speak_text_async(text):
+    """Speak without blocking command execution."""
+    if not text:
+        return
+
+    threading.Thread(
+        target=speak_text,
+        args=(str(text),),
+        daemon=True
+    ).start()
 
 def web_search(query, num_results=5):
     """Search the web using DDGS."""
@@ -1331,9 +1379,10 @@ def _execute_action(action):
             summary = summarize_search_results(target, results)
 
             if summary:
-                print("Assistant: Web search summary:")
-                print(summary)
-                print()
+                # Keep the spoken response on one line so the GUI TTS
+                # extraction receives the complete web-search answer.
+                clean_summary = " ".join(str(summary).split())
+                print(f"Assistant: {clean_summary}")
             else:
                 print("Assistant: I found results, but could not generate a summary.")
 
