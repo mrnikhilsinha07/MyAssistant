@@ -1,12 +1,11 @@
-import contextlib
-import ctypes
-import io
-import threading
+from pathlib import Path
 
-import webview
-
-import main as jarvis
-
+from PySide6.QtCore import Qt, QUrl, QObject, Slot, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtWidgets import QApplication
+from PySide6.QtWebEngineCore import QWebEnginePage
+from PySide6.QtWebEngineWidgets import QWebEngineView
 
 HTML = r"""
 <!doctype html>
@@ -17,23 +16,23 @@ HTML = r"""
 <title>MyAssistant</title>
 <style>
 *{box-sizing:border-box}
-html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#020106}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
 body{font-family:Consolas,"Segoe UI",sans-serif;color:#dffcff}
 #app{position:relative;width:100%;height:100%;background:
- radial-gradient(circle at 50% 48%,rgba(70,20,110,.16),transparent 34%),
- radial-gradient(circle at 50% 48%,rgba(0,130,160,.08),transparent 55%),#020106}
+ transparent}
 #top{position:absolute;z-index:20;left:26px;top:20px;font-size:19px;font-weight:700;letter-spacing:1px}
 #state{position:absolute;z-index:20;right:26px;top:22px;color:#67efff;font-size:11px;letter-spacing:1px}
 #visual{position:absolute;inset:0 0 105px 0}
 #visual canvas{display:block;width:100%;height:100%;cursor:grab}
 #visual canvas.dragging{cursor:grabbing}
+#visual canvas.moving-window{cursor:move}
 #command-area{position:absolute;z-index:30;left:24px;right:24px;bottom:22px;height:64px}
-#command-box{height:58px;border:1px solid #17474d;background:rgba(3,20,23,.86);display:flex;align-items:center}
-#command{flex:1;height:100%;border:0;outline:0;background:transparent;color:#d9ffff;padding:0 18px;font:13px "Segoe UI",sans-serif}
+#command-box{height:58px;border:1px solid #17474d;background:rgba(3,20,23,.72);display:flex;align-items:center}
+#command{flex:1;min-width:0;height:100%;border:0;outline:0;background:transparent;color:#d9ffff;padding:0 18px;font:13px "Segoe UI",sans-serif}
 #command::placeholder{color:#38666b}
-#send{height:42px;margin-right:8px;padding:0 22px;border:0;background:#062a2f;color:#5feaf2;font:bold 11px Consolas;cursor:pointer}
+#send{flex:0 0 auto;height:42px;margin-right:8px;padding:0 22px;border:0;background:#062a2f;color:#5feaf2;font:bold 11px Consolas;cursor:pointer}
 #send:hover{background:#0a4147}
-#voice{height:42px;margin-right:6px;padding:0 16px;border:1px solid #17474d;background:#041d21;color:#8df7ff;font:bold 11px Consolas;cursor:pointer}
+#voice{flex:0 0 auto;height:42px;margin-right:6px;padding:0 16px;border:1px solid #17474d;background:#041d21;color:#8df7ff;font:bold 11px Consolas;cursor:pointer}
 #voice:hover{background:#08343a}
 #voice:disabled{opacity:.45;cursor:default}
 #send:disabled{opacity:.45;cursor:default}
@@ -44,7 +43,7 @@ body{font-family:Consolas,"Segoe UI",sans-serif;color:#dffcff}
 </head>
 <body>
 <div id="app">
-  <div id="top">MY ASSISTANT</div>
+
   <div id="state">● ONLINE</div>
   <div id="mode">LOCAL AI CORE</div>
   <div id="visual"></div>
@@ -62,6 +61,68 @@ body{font-family:Consolas,"Segoe UI",sans-serif;color:#dffcff}
 <script type="module">
 import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js";
 
+const webChannelScript=document.createElement("script");
+webChannelScript.src="qrc:///qtwebchannel/qwebchannel.js";
+document.head.appendChild(webChannelScript);
+
+let nativeBridge=null;
+let assistantBridge=null;
+function waitForNativeBridge(){
+  if(typeof QWebChannel === "undefined"){ setTimeout(waitForNativeBridge,50); return; }
+  new QWebChannel(qt.webChannelTransport, channel=>{
+    nativeBridge=channel.objects.bridge;
+    assistantBridge=channel.objects.assistant;
+  });
+}
+waitForNativeBridge();
+
+
+function waitForAssistantSignals(){
+  if(!assistantBridge){ setTimeout(waitForAssistantSignals,50); return; }
+
+  assistantBridge.commandFinished.connect(output=>{
+    log.textContent=(output||"Command completed.").replace(/\\n/g," ");
+    setCoreState("complete");
+    setTimeout(()=>{
+      setCoreState("idle");
+      send.disabled=false;
+      voice.disabled=false;
+      input.focus();
+    },700);
+  });
+
+  assistantBridge.voiceFinished.connect(text=>{
+    if(!text){
+      log.textContent="No voice command detected.";
+      setCoreState("idle");
+      send.disabled=false;
+      voice.disabled=false;
+      return;
+    }
+
+    if(text.startsWith("__VOICE_ERROR__:")){
+      log.textContent=text.substring("__VOICE_ERROR__:".length);
+      setCoreState("idle");
+      send.disabled=false;
+      voice.disabled=false;
+      return;
+    }
+
+    input.value=text;
+    log.textContent="VOICE: "+text;
+
+    if(text.trim().toLowerCase()==="exit"){
+      assistantBridge.closeApp();
+      return;
+    }
+
+    setCoreState("thinking");
+    setCoreState("executing");
+    assistantBridge.runCommand(text);
+  });
+}
+waitForAssistantSignals();
+
 const visual=document.getElementById("visual");
 const input=document.getElementById("command");
 const send=document.getElementById("send");
@@ -74,12 +135,12 @@ let apiReady=false;
 window.pyReady=()=>{apiReady=true};
 
 const scene=new THREE.Scene();
-scene.fog=new THREE.FogExp2(0x020106,0.018);
 const camera=new THREE.PerspectiveCamera(45,1,.1,100);
 camera.position.set(0,0,8.2);
 
 const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
 renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setClearColor(0x000000,0);
 renderer.outputColorSpace=THREE.SRGBColorSpace;
 renderer.toneMapping=THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure=1.15;
@@ -200,22 +261,111 @@ const glow=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTextur
 glow.scale.set(7.2,7.2,1);
 core.add(glow);
 
-let working=false,coreState="idle",dragging=false,px=0,py=0;
+let working=false,coreState="idle",dragging=false,movingWindow=false,px=0,py=0,lastScreenX=0,lastScreenY=0;
 let targetX=-.05,targetY=.15,currentX=targetX,currentY=targetY;
 
+const coreHitRadius=78;
+
+function isUiControl(target){
+  return !!target.closest("#command-area, input, button, textarea, select, a");
+}
+
+function isCoreHit(e){
+  if(e.target!==renderer.domElement)return false;
+  const rect=renderer.domElement.getBoundingClientRect();
+  const cx=rect.left+rect.width/2;
+  const cy=rect.top+rect.height/2;
+  const dx=e.clientX-cx;
+  const dy=e.clientY-cy;
+  return Math.hypot(dx,dy)<=coreHitRadius;
+}
+
 renderer.domElement.addEventListener("pointerdown",e=>{
-  dragging=true;px=e.clientX;py=e.clientY;
-  renderer.domElement.classList.add("dragging");
+  e.preventDefault();
+  e.stopPropagation();
+
+  if(isCoreHit(e)){
+    dragging=true;
+    movingWindow=false;
+    px=e.clientX;py=e.clientY;
+    renderer.domElement.classList.add("dragging");
+    renderer.domElement.setPointerCapture(e.pointerId);
+    return;
+  }
+
+  movingWindow=true;
+  dragging=false;
+  lastScreenX=e.screenX;
+  lastScreenY=e.screenY;
+  renderer.domElement.classList.add("moving-window");
   renderer.domElement.setPointerCapture(e.pointerId);
 });
+
 renderer.domElement.addEventListener("pointermove",e=>{
-  if(!dragging)return;
-  targetY+=(e.clientX-px)*.006;
-  targetX+=(e.clientY-py)*.006;
-  targetX=Math.max(-1.15,Math.min(1.15,targetX));
-  px=e.clientX;py=e.clientY;
+  if(dragging){
+    e.preventDefault();
+    e.stopPropagation();
+    targetY+=(e.clientX-px)*.006;
+    targetX+=(e.clientY-py)*.006;
+    px=e.clientX;py=e.clientY;
+    return;
+  }
+
+  if(movingWindow){
+    e.preventDefault();
+    e.stopPropagation();
+    const dx=e.screenX-lastScreenX;
+    const dy=e.screenY-lastScreenY;
+    if(nativeBridge && (dx||dy)) nativeBridge.moveBy(dx,dy);
+    lastScreenX=e.screenX;
+    lastScreenY=e.screenY;
+  }
 });
-renderer.domElement.addEventListener("pointerup",()=>{dragging=false;renderer.domElement.classList.remove("dragging")});
+
+function stopPointerDrag(e){
+  if(e){
+    e.preventDefault();
+    e.stopPropagation();
+  }
+  dragging=false;
+  movingWindow=false;
+  renderer.domElement.classList.remove("dragging","moving-window");
+  if(e && renderer.domElement.hasPointerCapture?.(e.pointerId)){
+    renderer.domElement.releasePointerCapture(e.pointerId);
+  }
+}
+
+renderer.domElement.addEventListener("pointerup",stopPointerDrag);
+renderer.domElement.addEventListener("pointercancel",stopPointerDrag);
+renderer.domElement.addEventListener("lostpointercapture",()=>{
+  dragging=false;
+  movingWindow=false;
+  renderer.domElement.classList.remove("dragging","moving-window");
+});
+
+// Empty transparent space outside the 3D core moves the whole HUD.
+document.addEventListener("pointerdown",e=>{
+  if(isUiControl(e.target))return;
+  if(e.target===renderer.domElement)return;
+  if(!nativeBridge)return;
+  e.preventDefault();
+  lastScreenX=e.screenX;
+  lastScreenY=e.screenY;
+  movingWindow=true;
+});
+
+document.addEventListener("pointermove",e=>{
+  if(!movingWindow || dragging || isUiControl(e.target))return;
+  const dx=e.screenX-lastScreenX;
+  const dy=e.screenY-lastScreenY;
+  if(nativeBridge && (dx||dy)) nativeBridge.moveBy(dx,dy);
+  lastScreenX=e.screenX;
+  lastScreenY=e.screenY;
+});
+
+document.addEventListener("pointerup",()=>{
+  movingWindow=false;
+});
 
 function setCoreState(next){
   coreState=next;
@@ -257,77 +407,45 @@ async function listenVoice(){
   input.value="";
   log.textContent="LISTENING FOR VOICE...";
 
-  try{
-    await new Promise(requestAnimationFrame);
-    const text=await window.pywebview.api.listen_for_voice();
-
-    if(!text){
-      log.textContent="No voice command detected.";
-      setCoreState("idle");
-      return;
-    }
-    if(text.startsWith("__VOICE_ERROR__:")){
-      throw new Error(text.substring("__VOICE_ERROR__:".length));
-    }
-
-    input.value=text;
-    log.textContent="VOICE: "+text;
-
-    if(text.trim().toLowerCase()==="exit"){
-      if(window.pywebview) await window.pywebview.api.close_app();
-      return;
-    }
-
-    setCoreState("thinking");
-    await new Promise(requestAnimationFrame);
-    setCoreState("executing");
-
-    const result=await window.pywebview.api.run_command(text);
-    log.textContent=(result||"Command completed.").replace(/\n/g," ");
-    setCoreState("complete");
-    await new Promise(resolve=>setTimeout(resolve,700));
-  }catch(e){
-    log.textContent="Voice error: "+e;
-    setCoreState("complete");
-    await new Promise(resolve=>setTimeout(resolve,700));
+  if(!assistantBridge){
+    log.textContent="Assistant bridge is not ready.";
+    setCoreState("idle");
+    send.disabled=false;
+    voice.disabled=false;
+    return;
   }
 
-  setCoreState("idle");
-  send.disabled=false;
-  voice.disabled=false;
-  input.focus();
+  assistantBridge.listenForVoice();
 }
 
 async function sendCommand(){
   if(working)return;
+
   const command=input.value.trim();
   if(!command)return;
+
   input.value="";
   log.textContent="COMMAND: "+command;
+
   if(command.toLowerCase()==="exit"){
-    if(window.pywebview) await window.pywebview.api.close_app();
+    if(assistantBridge) assistantBridge.closeApp();
     return;
   }
+
+  if(!assistantBridge){
+    log.textContent="Assistant bridge is not ready.";
+    return;
+  }
+
   setCoreState("thinking");
   send.disabled=true;
-  try{
-    // Give the renderer a frame to show the THINKING state before the
-    // Python bridge begins the synchronous assistant operation.
-    await new Promise(requestAnimationFrame);
-    setCoreState("executing");
-    const result=await window.pywebview.api.run_command(command);
-    log.textContent=(result||"Command completed.").replace(/\n/g," ");
-    setCoreState("complete");
-    await new Promise(resolve=>setTimeout(resolve,700));
-  }catch(e){
-    log.textContent="Assistant error: "+e;
-    setCoreState("complete");
-    await new Promise(resolve=>setTimeout(resolve,700));
-  }
-  setCoreState("idle");
-  send.disabled=false;
-  input.focus();
+  voice.disabled=true;
+
+  await new Promise(requestAnimationFrame);
+  setCoreState("executing");
+  assistantBridge.runCommand(command);
 }
+
 send.onclick=sendCommand;
 voice.onclick=listenVoice;
 input.addEventListener("keydown",e=>{if(e.key==="Enter")sendCommand()});
@@ -392,20 +510,51 @@ animate();
 """
 
 
-class Bridge:
-    def __init__(self):
-        self._hwnd = None
+import contextlib
+import io
+import sys
+import threading
 
-    def listen_for_voice(self):
-        try:
-            result = jarvis.listen_for_voice()
-            if result is None:
-                return ""
-            return str(result).strip()
-        except Exception as error:
-            return f"__VOICE_ERROR__:{error}"
+import main as jarvis
 
-    def run_command(self, command):
+from PySide6.QtCore import Qt, QUrl, QObject, Slot, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtWidgets import QApplication
+from PySide6.QtWebEngineCore import QWebEnginePage
+from PySide6.QtWebEngineWidgets import QWebEngineView
+
+
+class TransparentWebEnginePage(QWebEnginePage):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setBackgroundColor(QColor(0, 0, 0, 0))
+
+
+class WindowBridge(QObject):
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+
+    @Slot(int, int)
+    def moveBy(self, dx, dy):
+        self.window.move(
+            self.window.x() + int(dx),
+            self.window.y() + int(dy)
+        )
+
+
+class AssistantBridge(QObject):
+    """Expose the real MyAssistant brain to the transparent HUD."""
+
+    commandFinished = Signal(str)
+    voiceFinished = Signal(str)
+
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+
+    def _run_command_worker(self, command):
         buffer = io.StringIO()
 
         try:
@@ -420,77 +569,103 @@ class Bridge:
                 else:
                     output = "Assistant: Command completed."
 
-           # Extract only the human-facing assistant response for TTS.
-            speech_text = ""
-
-            assistant_lines = []
-
+            # Use the real TTS engine when available. Only human-facing
+            # Assistant lines are spoken.
+            speech_lines = []
             for line in output.splitlines():
                 line = line.strip()
-
                 if line.lower().startswith("assistant:"):
-                    assistant_lines.append(
-                        line[len("assistant:"):].strip()
-                    )
+                    speech_lines.append(line[len("assistant:"):].strip())
 
-            if assistant_lines:
-                speech_text = " ".join(assistant_lines)
+            if speech_lines and hasattr(jarvis, "speak_text_async"):
+                jarvis.speak_text_async(" ".join(speech_lines))
 
-            if speech_text:
-                jarvis.speak_text_async(speech_text)
-            return output
+            self.commandFinished.emit(output)
 
         except Exception as error:
-            error_message = f"Assistant error: {error}"
-            jarvis.speak_text_async("Sorry, an error occurred.")
-            return error_message
-    def close_app(self):
-        # pywebview JS API methods execute on worker threads. Do not call
-        # window.destroy() directly here because WebView2 native objects
-        # must be accessed from the GUI thread. Post WM_CLOSE instead;
-        # Windows delivers it through the window's normal UI message loop.
-        if self._hwnd:
-            ctypes.windll.user32.PostMessageW(self._hwnd, 0x0010, 0, 0)
+            self.commandFinished.emit(f"Assistant error: {error}")
+
+    @Slot(str, result=str)
+    def runCommand(self, command):
+        threading.Thread(
+            target=self._run_command_worker,
+            args=(command,),
+            daemon=True,
+        ).start()
+        return "__COMMAND_STARTED__"
+
+    def _listen_voice_worker(self):
+        try:
+            text = jarvis.listen_for_voice()
+            self.voiceFinished.emit(str(text or ""))
+        except Exception as error:
+            self.voiceFinished.emit(f"__VOICE_ERROR__:{error}")
+
+    @Slot(result=str)
+    def listenForVoice(self):
+        threading.Thread(
+            target=self._listen_voice_worker,
+            daemon=True,
+        ).start()
+        return "__VOICE_STARTED__"
+
+    @Slot(result=str)
+    def closeApp(self):
+        try:
+            self.window.close()
+        except Exception:
+            QApplication.quit()
         return "closed"
 
 
-def _cache_native_handle(window, api):
-    # Kept for compatibility with pywebview versions that pass the window.
-    try:
-        api._hwnd = int(window.native.Handle.ToInt64())
-    except Exception:
-        api._hwnd = None
-
-
-def _cache_native_handle_noargs(window, api):
-    # pywebview 6.2.x may invoke before_show without positional arguments.
-    # The window is already available through this closure.
-    try:
-        api._hwnd = int(window.native.Handle.ToInt64())
-    except Exception:
-        api._hwnd = None
+class AssistantWindow(QWebEngineView):
+    """Frameless transparent HUD window."""
+    pass
 
 
 def main():
-    # MyAssistant does not use browser navigation menus. Disabling pywebview's
-    # default menus avoids unnecessary WebView2 back/forward state queries.
-    webview.settings["SHOW_DEFAULT_MENUS"] = False
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
 
-    api = Bridge()
-
-    window = webview.create_window(
-        "MyAssistant",
-        html=HTML,
-        js_api=api,
-        width=1200,
-        height=760,
-        min_size=(900, 650),
-        background_color="#020106",
+    window = AssistantWindow()
+    window.setWindowTitle("MyAssistant")
+    window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    window.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+    window.setWindowFlags(
+        Qt.WindowType.FramelessWindowHint
+        | Qt.WindowType.WindowStaysOnTopHint
     )
+    window.setStyleSheet("background: transparent; border: none;")
 
-    window.events.before_show += lambda: _cache_native_handle_noargs(window, api)
-    webview.start(gui="edgechromium", debug=False, http_server=False)
+    page = TransparentWebEnginePage(window)
+    window.setPage(page)
+
+    bridge = WindowBridge(window)
+    assistant = AssistantBridge(window)
+
+    channel = QWebChannel(page)
+    channel.registerObject("bridge", bridge)
+    channel.registerObject("assistant", assistant)
+    page.setWebChannel(channel)
+
+    window.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+    window.resize(360, 250)
+
+    # Start in the upper-left corner with a 20 px margin.
+    screen = app.primaryScreen()
+    if screen:
+        available = screen.availableGeometry()
+        margin = 20
+        x = available.left() + margin
+        y = available.top() + margin
+        window.move(x, y)
+
+    window.show()
+    page.setBackgroundColor(QColor(0, 0, 0, 0))
+    page.setHtml(HTML, QUrl("about:blank"))
+
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
