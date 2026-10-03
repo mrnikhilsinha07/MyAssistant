@@ -2515,15 +2515,30 @@ def process_command(command):
 
 def main():
     print("Loading local AI...")
-    try:
-        OLLAMA_CLIENT.chat(
-            model=MODEL,
-            messages=[{"role": "user", "content": "Reply with OK only."}]
-        )
-        print("Local AI ready.")
-    except Exception as error:
-        print(f"Warning: Could not contact local AI ({error}).")
-        print("Please ensure the Ollama service is running and 'qwen3:1.7b' is installed.")
+
+    ollama_ready = False
+
+    for attempt in range(1, 6):
+        try:
+            OLLAMA_CLIENT.chat(
+                model=MODEL,
+                messages=[{"role": "user", "content": "Reply with OK only."}],
+            )
+
+            ollama_ready = True
+            print("Local AI ready.")
+            break
+
+        except Exception as error:
+            if attempt < 5:
+                print(f"Waiting for Ollama... {attempt}/5")
+                time.sleep(2)
+            else:
+                print(f"Warning: Could not contact local AI ({error}).")
+                print(
+                    "Please ensure the Ollama service is running "
+                    "and 'qwen3:1.7b' is installed."
+                )
     print("========================================")
     print("        MY PERSONAL ASSISTANT")
     print("========================================")
